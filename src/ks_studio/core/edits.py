@@ -6,6 +6,7 @@
 from collections.abc import Callable
 from dataclasses import replace
 
+from ks_studio.core.subtitles import MIN_CUE, Cue, Subtitles
 from ks_studio.core.project import MAIN_TRACK, MIN_VIDEO_TRACKS, Clip, Placed, Placement, Project, new_id
 
 
@@ -73,7 +74,23 @@ def delete_range(project: Project, start: int, end: int) -> Project:
         replace(o, start=o.start - (end - start)) if o.start >= end else o for o in cut.overlays if o.clip.id not in inside
     )
     markers = tuple(m - (end - start) if m >= end else m for m in cut.markers if not start <= m < end)
-    return replace(cut, clips=clips, overlays=overlays, markers=markers)
+    return replace(cut, clips=clips, overlays=overlays, markers=markers, subtitles=_cut_cues(cut, start, end))
+
+
+def _cut_cues(project: Project, start: int, end: int) -> Subtitles:
+    """자막도 [start, end) 구간을 잘라내고 뒤를 당긴다. 구간에 걸친 자막은 남는 부분만, 다 들어간 자막은 지운다."""
+    fps, length = project.fps, (end - start) / project.fps
+    lo, hi = start / fps, end / fps
+
+    def move(t: float) -> float:
+        return t if t < lo else (lo if t < hi else t - length)
+
+    cues = []
+    for cue in project.subtitles.cues:
+        new_start, new_end = move(cue.start), move(cue.end)
+        if new_end - new_start >= MIN_CUE:
+            cues.append(Cue(round(new_start, 3), round(new_end, 3), cue.text))
+    return replace(project.subtitles, cues=tuple(cues))
 
 
 def delete_ranges(project: Project, ranges: list[tuple[int, int]]) -> Project:
@@ -273,10 +290,41 @@ def follow_main(before: Project, after: Project) -> Project:
         followers.append(replace(o, start=target.start + local))
     # 움직이지 않은 클립이 자리를 먼저 차지하고, 움직인 클립이 겹치면 위로 올라간다
     followers.sort(key=lambda o: (o not in untouched, o.start, o.track))
-    project = replace(after, overlays=tuple(fixed))
+    project = replace(after, overlays=tuple(fixed), subtitles=_follow_cues(before, after, old_main, new_main, old_ids))
     for o in followers:
         project = _place_free(project, o)
     return project
+
+
+def _follow_cues(before: Project, after: Project, old_main, new_main, old_ids: set[str]) -> Subtitles:
+    """자막도 위 줄 클립처럼 시작 지점 아래의 V1 장면을 따라간다 (길이는 그대로). 그 V1 클립이 지워지면 자막도 지운다.
+
+    편집이 직접 바꾼 자막(구간 지우기 등)은 그대로 둔다.
+    """
+    untouched = set(before.subtitles.cues)
+    cues = []
+    for cue in after.subtitles.cues:
+        if cue not in untouched:
+            cues.append(cue)
+            continue
+        frame = round(cue.start * before.fps)
+        anchor = next((p for p in old_main if p.start <= frame < p.end), None)
+        if anchor is None:  # V1 끝 뒤
+            shift = (after.main_duration - before.main_duration) / after.fps
+            cues.append(Cue(round(cue.start + shift, 3), round(cue.end + shift, 3), cue.text))
+            continue
+        seconds = before.source_time(anchor.clip, frame - anchor.start)
+        target = _main_showing(new_main, anchor.clip, seconds, old_ids)
+        if target is None:  # 붙어 있던 V1 클립이 지워짐
+            continue
+        local = max(0, round((seconds - target.clip.in_frame / target.clip.fps) * after.fps))
+        start = (target.start + local) / after.fps
+        cues.append(Cue(round(start, 3), round(start + cue.end - cue.start, 3), cue.text))
+    return replace(after.subtitles, cues=tuple(sorted(cues, key=lambda c: (c.start, c.end))))
+
+
+def set_subtitles(project: Project, subtitles: Subtitles) -> Project:
+    return replace(project, subtitles=subtitles)
 
 
 def _place_free(project: Project, placement: Placement) -> Project:

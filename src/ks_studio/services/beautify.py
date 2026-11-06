@@ -35,6 +35,7 @@ from ks_studio.core.beauty import (
     eye_distance,
     eye_polygons,
     eye_zooms,
+    face_small_scale,
     eyelid_polygons,
     frontal_weight,
     lip_polygons,
@@ -43,6 +44,7 @@ from ks_studio.core.beauty import (
     nostril_polygon,
     size_weight,
     skin_polygon,
+    face_outline,
     slim_pulls,
     smile_pulls,
     smooth_track,
@@ -125,6 +127,8 @@ def apply(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySetting
     _warp(face, smile_pulls(lm, k["smile"]))
     for zoom in eye_zooms(lm, k["eyes"]):
         _zoom(face, zoom)
+    if k["face_small"] > 0:  # 마지막에: 눈 키우기 등은 원래 자리에서 하고 얼굴째 줄인다
+        _shrink_face(face, lm, k["face_small"])
     return out
 
 
@@ -186,6 +190,7 @@ REGION_COLORS = {  # RGB
     "cheekbone": (255, 150, 40),
     "chin": (230, 120, 255),
     "eyes": (80, 160, 255),
+    "face_small": (255, 170, 210),
     "nose_slim": (60, 200, 255),
     "nose_length": (40, 230, 220),
     "blush": (255, 105, 150),
@@ -242,6 +247,8 @@ def _areas(image: np.ndarray, lm: np.ndarray, settings: BeautySettings) -> list[
             areas.append((kind, circles(pulls), pulls))
     if settings.eyes:
         areas.append(("eyes", circles(eye_zooms(lm, settings.eyes)), []))
+    if settings.face_small:
+        areas.append(("face_small", _fill(shape, [face_outline(lm)]), []))
     if settings.blush:
         mask = np.zeros(shape[:2], np.float32)
         for e in cheek_ellipses(lm):
@@ -566,6 +573,36 @@ def _eyeshadow(face: np.ndarray, lm: np.ndarray, strength: float, color: str) ->
         lab[..., :1] += (target[:1] - lab[..., :1]) * amount * 0.5
 
     _in_lab(face, _eyelid_mask(face.shape, lm), tint)
+
+
+FACE_SMALL_FILL_SCALE = 0.25  # 틈 메우기(inpaint)는 1/4 크기에서 (메울 곳은 흐린 띠라 충분하고 빠르다)
+FACE_SMALL_FEATHER = 0.05  # 줄인 얼굴 가장자리를 눈 사이 거리의 5%만큼 부드럽게 (2%는 경계선이 보였다)
+
+
+def _shrink_face(face: np.ndarray, lm: np.ndarray, strength: float) -> None:
+    """얼굴 영역(윤곽 + 이마 아래쪽)만 가운데로 고르게 줄인다. 제자리에서.
+
+    퍼지는 확대·축소 변형은 얼굴 둘레의 배경까지 휘게 한다 → 얼굴만 떼어 줄이고, 줄어서 생긴 틈(원래 얼굴 가장자리 ~
+    줄인 얼굴 가장자리)은 둘레 화소(배경·머리카락·목)로 메꾼다 (cv2.inpaint). 원래 얼굴 영역 밖은 화소 하나 바꾸지 않는다.
+    """
+    center_x, center_y, scale = face_small_scale(lm, strength)
+    eyes = eye_distance(lm)
+    shape = face.shape
+    old = _fill(shape, [face_outline(lm)])  # 원래 얼굴 영역 (윤곽 + 눈썹)
+    to_small = np.float32([[scale, 0, center_x * (1 - scale)], [0, scale, center_y * (1 - scale)]])
+    small_face = cv2.warpAffine(face, to_small, (shape[1], shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    new = cv2.warpAffine(old, to_small, (shape[1], shape[0]), flags=cv2.INTER_LINEAR)
+    hole = _grow((old > 0.01).astype(np.float32), 0.01 * eyes) > 0  # 메울 수 있는 곳: 원래 얼굴 + 가장자리 몇 화소
+    # 틈 메우기: 원래 얼굴 자리를 둘레에서 채운 그림 (줄인 얼굴 아래에 깔린다)
+    h, w = shape[:2]
+    small_size = (max(8, round(w * FACE_SMALL_FILL_SCALE)), max(8, round(h * FACE_SMALL_FILL_SCALE)))
+    hole_small = cv2.resize(hole.astype(np.uint8) * 255, small_size, interpolation=cv2.INTER_NEAREST)
+    hole_small = cv2.dilate(hole_small, np.ones((3, 3), np.uint8))
+    filled = cv2.inpaint(cv2.resize(face, small_size, interpolation=cv2.INTER_AREA), hole_small, 3, cv2.INPAINT_TELEA)
+    behind = cv2.resize(filled, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    alpha = cv2.GaussianBlur(new, (0, 0), max(0.5, FACE_SMALL_FEATHER * eyes))[..., None]
+    mixed = behind + (small_face.astype(np.float32) - behind) * alpha
+    face[hole] = np.clip(mixed[hole] + 0.5, 0, 255).astype(np.uint8)
 
 
 def _zoom(image: np.ndarray, zoom: Zoom) -> None:

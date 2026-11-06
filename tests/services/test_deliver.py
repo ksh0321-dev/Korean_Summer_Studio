@@ -88,3 +88,27 @@ def test_preview_is_small_and_cancel_removes_file(tmp_path):
     with pytest.raises(Cancelled):
         export_video(src, tmp_path / "c.mp4", OutputFormat(), None, cancel=cancel)
     assert not (tmp_path / "c.mp4").exists() and not (tmp_path / "c.mp4.part").exists()
+
+
+def test_export_timeline_burns_captions_and_keeps_sound(tmp_path):
+    from ks_studio.core.project import Clip, Project
+    from ks_studio.core.workspace import Workspace
+    from ks_studio.services.deliver import export_timeline
+    from ks_studio.services.sources import SourceCache
+
+    make_wide(tmp_path / "wide.mp4", seconds=1.0)
+    project = Project(fps=30, clips=(Clip("wide.mp4", 0, 30),), subtitles=Subtitles((Cue(0.5, 1.0, "Hello"),)))
+    out = tmp_path / "timeline.mp4"
+    size = export_timeline(project, Workspace(tmp_path), SourceCache(), out, OutputFormat("1:1", "crop", short=180))
+    assert size == (180, 180)
+    with av.open(str(out)) as c:
+        frames = [f.to_ndarray(format="rgb24").astype(int) for f in c.decode(video=0)]
+        assert c.streams.audio
+    assert len(frames) == 30 and frames[0].shape == (180, 180, 3)
+    bottom = slice(100, 170)
+    assert np.abs(frames[0][bottom] - frames[25][bottom]).max() > 100  # 0.5초 뒤엔 자막
+    plain = tmp_path / "plain.mp4"
+    export_timeline(project, Workspace(tmp_path), SourceCache(), plain, OutputFormat("1:1", "crop", short=180), with_subtitles=False)
+    with av.open(str(plain)) as c:
+        last = [f.to_ndarray(format="rgb24").astype(int) for f in c.decode(video=0)][25]
+    assert np.abs(frames[0][bottom] - last[bottom]).max() < 30  # 자막 끄면 그대로

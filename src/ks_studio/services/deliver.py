@@ -1,4 +1,4 @@
-"""최종 내보내기: 영상 파일 하나 → 고른 비율·해상도·형식의 배포용 MP4 (+ 자막 굽기). 영상 편집의 마지막 단계.
+"""최종 내보내기: 컷편집 타임라인(자막은 여기서 굽는다) 또는 영상 파일 하나 → 고른 비율·해상도·형식의 배포용 MP4.
 
 아무 영상이나 바로: 녹화본·컷편집 결과·AI 보정본·휴대폰 영상. 휴대폰 영상은 편집용 사본이 아니라 원본에서
 회전·색 변환·비율·자막을 한 번에 하고 한 번만 압축한다 (편집용 사본과 같은 길 — optimize.make_optimized).
@@ -12,12 +12,20 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+import os
+from fractions import Fraction
+
 import av
+import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from ks_studio.core.subtitles import Subtitles
 from ks_studio.services.captions import CaptionBurner
-from ks_studio.services.optimize import Cancelled, Plan, inspect, make_optimized
+from ks_studio.core.project import Project
+from ks_studio.core.workspace import Workspace
+from ks_studio.services.optimize import Cancelled, Plan, add_video_stream, inspect, make_optimized
+from ks_studio.services.render import TimelineRenderer, canvas_size
+from ks_studio.services.sources import AUDIO_RATE, SourceCache
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +128,76 @@ def export_video(path: Path, output: Path, fmt: OutputFormat, subs: Subtitles | 
     return plan
 
 
+AUDIO_BITRATE = 192_000
+
+
+def export_timeline(project: Project, workspace: Workspace, sources: SourceCache, output: Path, fmt: OutputFormat,
+                    on_progress=None, cancel: threading.Event | None = None, preview: bool = False,
+                    with_subtitles: bool = True) -> tuple[int, int]:
+    """컷편집 타임라인 → output. 타임라인을 그리면서 바로 비율·크기를 맞추고 자막을 굽는다 (중간 파일 없이 압축 한 번).
+
+    자막은 project.subtitles (타임라인 시각). 돌려주는 값 = 출력 크기. 멈추면 Cancelled (쓰다 만 파일은 지운다).
+    """
+    fps = project.fps
+    canvas = canvas_size(project, workspace, sources)
+    size = target_size(canvas, fmt)
+    if preview:
+        size = target_size(canvas, fmt, min(PREVIEW_SHORT, min(size)))
+    # 그리는 크기: 출력을 채우는 만큼만 (자르기면 긴 쪽 기준, 여백이면 짧은 쪽 기준) — 원본보다 크게는 안 그린다
+    pick = max if fmt.fit == "crop" else min
+    scale = min(1.0, pick(size[0] / canvas[0], size[1] / canvas[1]))
+    drawn = (_even(canvas[0] * scale), _even(canvas[1] * scale))
+    renderer = TimelineRenderer(project, workspace, sources, drawn, "yuv420p")
+    burner = CaptionBurner(project.subtitles, size, fps) if with_subtitles and project.subtitles.cues else None
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_name(output.name + ".part")
+    try:
+        with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as dst:
+            video = add_video_stream(dst, size, fps, PREVIEW_ENCODERS if preview else ENCODERS[fmt.codec])
+            audio = dst.add_stream("aac", rate=AUDIO_RATE, layout="mono")
+            audio.bit_rate = AUDIO_BITRATE
+            graph = av.filter.Graph()
+            nodes = [graph.add_buffer(width=drawn[0], height=drawn[1], format="yuv420p", time_base=Fraction(1, fps))]
+            for name, args in (*fit_filters(drawn, size, fmt.fit), ("format", "yuv420p")):
+                nodes.append(graph.add(name, args))
+            nodes.append(graph.add("buffersink"))
+            graph.link_nodes(*nodes).configure()
+
+            def drain() -> None:
+                while True:
+                    try:
+                        frame = graph.pull()
+                    except (av.BlockingIOError, av.EOFError):
+                        return
+                    pts = frame.pts
+                    if burner is not None:
+                        frame = burner(frame)
+                    frame.pts, frame.time_base = pts, Fraction(1, fps)
+                    dst.mux(video.encode(frame))
+
+            total = max(1, project.duration)
+            for t, frame, samples in renderer.frames(0):
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled()
+                frame.pts, frame.time_base = t, Fraction(1, fps)
+                graph.push(frame)
+                drain()
+                chunk = av.AudioFrame.from_ndarray(np.ascontiguousarray(samples.reshape(1, -1)), format="flt", layout="mono")
+                chunk.sample_rate, chunk.pts, chunk.time_base = AUDIO_RATE, t * renderer.samples_per_frame, Fraction(1, AUDIO_RATE)
+                dst.mux(audio.encode(chunk))
+                if on_progress and t % 15 == 0:
+                    on_progress(min(1.0, t / total))
+            graph.push(None)
+            drain()
+            dst.mux(video.encode(None))
+            dst.mux(audio.encode(None))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, output)
+    return size
+
+
 class ExportWorker(QObject):
     """내보내기를 스레드 하나에서 (GPU 인코더를 나눠 쓰므로 한 번에 하나). kind = "preview" 또는 "final"."""
 
@@ -136,24 +214,34 @@ class ExportWorker(QObject):
         threading.Thread(target=self._worker, daemon=True, name="export").start()
 
     def request(self, kind: str, path: Path, output: Path, fmt: OutputFormat, subs: Subtitles | None) -> None:
+        """영상 파일 하나를 내보낸다."""
+        self.request_job(kind, output, lambda progress, cancel: export_video(path, output, fmt, subs, progress, cancel, kind == "preview"))
+
+    def request_timeline(self, kind: str, project: Project, workspace: Workspace, sources: SourceCache,
+                         output: Path, fmt: OutputFormat, with_subtitles: bool) -> None:
+        """컷편집 타임라인을 내보낸다 (자막을 굽는다)."""
+        self.request_job(kind, output, lambda progress, cancel: export_timeline(
+            project, workspace, sources, output, fmt, progress, cancel, kind == "preview", with_subtitles))
+
+    def request_job(self, kind: str, output: Path, run) -> None:
         self.busy = kind
         self._cancel.clear()
-        self._jobs.put((kind, path, output, fmt, subs))
+        self._jobs.put((kind, output, run))
 
     def cancel(self) -> None:
         self._cancel.set()
 
     def _worker(self) -> None:
         while True:
-            kind, path, output, fmt, subs = self._jobs.get()
+            kind, output, run = self._jobs.get()
             try:
-                export_video(path, output, fmt, subs, lambda r: self.progress.emit(kind, r), self._cancel, kind == "preview")
+                run(lambda r, k=kind: self.progress.emit(k, r), self._cancel)
             except Cancelled:
                 self.busy = None
                 self.cancelled.emit(kind)
                 continue
             except Exception as e:
-                log.exception("내보내기 실패: %s", path)
+                log.exception("내보내기 실패: %s", output)
                 self.busy = None
                 self.failed.emit(kind, str(e))
                 continue

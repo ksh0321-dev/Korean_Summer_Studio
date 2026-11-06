@@ -19,7 +19,6 @@ from pathlib import Path
 
 from ks_studio.core.beauty import load_ai_state
 from ks_studio.core.project import Project
-from ks_studio.core.subtitles import load_subtitles
 from ks_studio.core.workspace import Workspace
 from ks_studio.services.face import track_file
 from ks_studio.services.sources import OPTIMIZED_DIR, cache_name, optimized_path
@@ -98,7 +97,7 @@ def sweep(workspace: Workspace, live: Iterable[Path], keep: Iterable[Path] = ())
     copies = {optimized_path(cache, p).name for p in live}
     doomed: list[Path] = [workspace.root / "project.tmp"]  # 프로젝트 폴더 바로 아래는 우리가 만든 것만 (사용자 파일이 있을 수 있다)
     for folder in (cache, cache / OPTIMIZED_DIR, *(cache / s for s in SUBDIRS), workspace.ai_dir,
-                   workspace.exports_dir, workspace.final_dir, workspace.subtitles_file.parent):
+                   workspace.exports_dir, workspace.final_dir):
         if folder.exists():
             for pattern in LEFTOVER_PATTERNS:
                 doomed += [f for f in folder.glob(pattern) if time.time() - f.stat().st_mtime > BUSY_SECONDS]
@@ -130,12 +129,11 @@ def sweep(workspace: Workspace, live: Iterable[Path], keep: Iterable[Path] = ())
 def project_files(workspace: Workspace) -> tuple[list[Path], set[Path]]:
     """(지금 프로젝트가 쓰는 원본들, 남길 얼굴 분석 파일). 탭마다 저장한 내용을 모두 본다.
 
-    원본 = 워크스페이스 영상(녹화본·컷편집 결과·AI 보정본·가져온 것, 뺀 녹화본 제외) + 타임라인 클립 + AI·자막 탭 영상.
+    원본 = 워크스페이스 영상(녹화본·컷편집 결과·AI 보정본·가져온 것, 뺀 녹화본 제외) + 타임라인 클립 + AI 탭 영상.
     """
     project = Project.load(workspace.project_file)
     ai = load_ai_state(workspace.ai_settings_file)
-    subtitles = load_subtitles(workspace.subtitles_file)
-    sources = set(workspace.videos((*ai.imported, *subtitles.imported))) | set(ai.settings) | set(subtitles.docs)
+    sources = set(workspace.videos(ai.imported)) | set(ai.settings)
     sources |= {c.source for c in project.clips} | {o.clip.source for o in project.overlays}
     live = [workspace.resolve(s) for s in sources]
     keep = set()

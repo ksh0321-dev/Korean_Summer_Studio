@@ -23,6 +23,7 @@ class VideoView(QWidget):
         self._overlay = ""
         self._badge = ""
         self._box: QRectF | None = None  # 0~1 화면 비율 좌표
+        self._caption: tuple | None = None  # (자막 글, CaptionStyle) — 내보낼 때 굽는 것과 같은 모양으로
 
     def set_message(self, text: str) -> None:
         """프레임 대신 안내 문구를 띄운다."""
@@ -71,6 +72,12 @@ class VideoView(QWidget):
         self._image = frame.toImage()
         self.update()
 
+    def set_caption(self, text: str, style) -> None:
+        caption = (text, style) if text else None
+        if caption != self._caption:
+            self._caption = caption
+            self.update()
+
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.GlobalColor.black)
@@ -87,6 +94,10 @@ class VideoView(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.drawImage(target, self._image)
         painter.restore()
+        if self._caption is not None:
+            from ks_studio.services.captions import paint_caption  # 자막이 있을 때만 (녹화 화면은 필요 없다)
+
+            paint_caption(painter, QRectF(target), self._caption[0], self._caption[1], self._image.width(), self._image.height())
 
         if self._guide:
             self._paint_guide(painter, target)

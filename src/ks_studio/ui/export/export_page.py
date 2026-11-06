@@ -1,7 +1,7 @@
-"""내보내기 단계 (영상 편집의 마지막): 영상 하나 → 고른 비율·해상도·형식의 최종 MP4, 자막은 구워서.
+"""내보내기 단계 (영상 편집의 마지막): 컷편집 타임라인(자막을 여기서 굽는다) 또는 영상 파일 하나 → 최종 MP4.
 
-어느 단계를 거쳤든 바로 내보낸다 — 자막만 만든 영상, AI 보정만 한 영상, 녹화본 그대로도.
-AI 보정본에 자막이 없으면 그 원본 영상의 자막을 쓴다 (보정본은 원본과 프레임이 같다).
+흐름: 녹화 → AI 보정(자막 없는 원본) → 컷편집(보정본 + 자막 줄) → 내보내기에서 합친다.
+AI 보정만 한 영상·녹화본도 파일로 바로 내보낼 수 있다 (자막은 컷편집 타임라인에만 있다).
 [저해상도 미리보기]: 짧은 변 800px로 빠르게 만들어 바로 튼다 — 최종 파일을 만들어 확인하는 수고를 던다.
 최종 파일: <프로젝트>/exports/final/<이름>_<비율>_<해상도>.mp4
 """
@@ -25,15 +25,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ks_studio.core.beauty import load_ai_state
-from ks_studio.core.subtitles import Subtitles, load_subtitles
+from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
 from ks_studio.services.deliver import CODECS, FITS, RATIOS, RESOLUTIONS, ExportWorker, OutputFormat
 from ks_studio.services.sources import SourceCache
 from ks_studio.ui.editor.media_bin import VIDEO_FILTER
 from ks_studio.ui.widgets.clip_player import ClipPlayer
 from ks_studio.ui.widgets.layout import stage_layout
-from ks_studio.ui.widgets.source_row import SourceRow, add_row, facts
+from ks_studio.ui.widgets.source_row import SourceRow, add_row, clock, facts
+
+TIMELINE = "<timeline>"  # 목록 맨 위 '컷편집 타임라인'의 자리 표시
 from ks_studio.ui.widgets.status_bar import ERROR, INFO
 
 
@@ -55,8 +56,7 @@ class ExportPage(QWidget):
         self._workspace: Workspace | None = None
         self._source: str | None = None
         self._imported: tuple[str, ...] = ()
-        self._subtitles: dict = {}
-        self._ai_sources: tuple[str, ...] = ()
+        self._project = Project()  # 컷편집 타임라인 (탭을 열 때 project.json에서)
         self.worker = ExportWorker(self)
         self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_finished)
@@ -144,8 +144,7 @@ class ExportPage(QWidget):
             self._source = None
             self._imported = ()
             self.player.release()
-        self._subtitles = load_subtitles(workspace.subtitles_file).docs  # 자막 탭에서 고쳤을 수 있다
-        self._ai_sources = tuple(load_ai_state(workspace.ai_settings_file).settings)
+        self._project = Project.load(workspace.project_file)  # 컷편집에서 고쳤을 수 있다 (탭을 바꾸면 저장된다)
         self._fill_list()
         self._update_controls()
 
@@ -158,12 +157,13 @@ class ExportPage(QWidget):
         current = self._source
         self.list.blockSignals(True)
         self.list.clear()
+        if self._project.duration:
+            fps, cues = self._project.fps, len(self._project.subtitles.cues)
+            details = f"{clock(self._project.duration / fps)} · 클립 {len(self._project.placed())}개" + (f" · 자막 {cues}줄" if cues else "")
+            add_row(self.list, SourceRow(TIMELINE, "🎬 컷편집 타임라인", details), TIMELINE)
         for source in self._workspace.videos(self._imported):
             path = self._workspace.resolve(source)
             notes = [facts(path, self._sources)] if path.exists() else ["⚠ 파일 없음"]
-            subs, _ = self._subtitles_for(source)
-            if subs is not None:
-                notes.append(f"자막 {len(subs.cues)}줄")
             row = SourceRow(source, path.name, " · ".join(n for n in notes if n), thumbnail=(self._sources, path))
             add_row(self.list, row, source, enabled=path.exists())
         rows = [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())]
@@ -186,25 +186,16 @@ class ExportPage(QWidget):
             return
         self._source = self.list.item(row).data(Qt.ItemDataRole.UserRole)
         self.player.release()
-        self.player.open(self._sources.media(self._path()), play=False)
-        self.view_label.setText(f"원본: {self._path().name}")
+        if self._source == TIMELINE:
+            self.view_label.setText("컷편집 타임라인 — [저해상도 미리보기]로 자막까지 합친 결과를 먼저 보세요")
+        else:
+            self.player.open(self._sources.media(self._path()), play=False)
+            self.view_label.setText(f"원본: {self._path().name}")
         self._update_controls()
 
     def _path(self) -> Path:
         return self._workspace.resolve(self._source)
 
-    def _subtitles_for(self, source: str) -> tuple[Subtitles | None, str]:
-        """(구울 자막, 설명). 그 영상의 자막, 없으면 AI 보정본의 원본 영상 자막."""
-        subs = self._subtitles.get(source)
-        if subs is not None and subs.cues:
-            return subs, f"자막 넣기 ({len(subs.cues)}줄)"
-        path = self._workspace.resolve(source)
-        for original in self._ai_sources:
-            if self._workspace.ai_output(original) == path:
-                subs = self._subtitles.get(original)
-                if subs is not None and subs.cues:
-                    return subs, f"자막 넣기 (원본 {Path(original).name}의 {len(subs.cues)}줄)"
-        return None, "자막 없음 — 자막 탭에서 만들 수 있습니다"
 
     def _format(self) -> OutputFormat:
         return OutputFormat(self.ratio_combo.currentData(), self.fit_combo.currentData(),
@@ -215,16 +206,19 @@ class ExportPage(QWidget):
     def _output(self, kind: str) -> Path:
         if kind == "preview":
             return self._workspace.cache_dir / "export_preview.mp4"
-        return self._workspace.final_dir / f"{self._path().stem}_{self._format().tag}.mp4"
+        stem = self._workspace.root.name if self._source == TIMELINE else self._path().stem
+        return self._workspace.final_dir / f"{stem}_{self._format().tag}.mp4"
 
     def _start(self, kind: str) -> None:
-        subs, _ = self._subtitles_for(self._source)
-        subs = subs if self.subtitle_check.isChecked() else None
         self.player.release()  # 같은 미리보기 파일을 덮어쓰므로 놓는다 (Windows)
         self.progress.setValue(0)
         self.progress.show()
         self.status.setText("저해상도 미리보기 만드는 중…" if kind == "preview" else f"내보내는 중… → {self._output(kind).name}")
-        self.worker.request(kind, self._path(), self._output(kind), self._format(), subs)
+        if self._source == TIMELINE:
+            self.worker.request_timeline(kind, self._project, self._workspace, self._sources, self._output(kind),
+                                         self._format(), self.subtitle_check.isChecked())
+        else:
+            self.worker.request(kind, self._path(), self._output(kind), self._format(), None)
         self._update_controls()
 
     def _on_progress(self, kind: str, ratio: float) -> None:
@@ -237,7 +231,8 @@ class ExportPage(QWidget):
         self._update_controls()
         if kind == "preview":
             self.status.setText("저해상도 미리보기 — 최종 파일과 같은 비율·자막입니다")
-            self.view_label.setText(f"저해상도 미리보기 (짧은 변 800px): {self._path().name}")
+            name = "컷편집 타임라인" if self._source == TIMELINE else self._path().name
+            self.view_label.setText(f"저해상도 미리보기 (짧은 변 800px): {name}")
             self.player.open(output)
         else:
             size_mb = output.stat().st_size / 1e6
@@ -266,9 +261,12 @@ class ExportPage(QWidget):
         ready = self._source is not None
         busy = self.worker.busy is not None
         self.fit_combo.setEnabled(self.ratio_combo.currentData() != "original")
-        subs, label = self._subtitles_for(self._source) if ready else (None, "자막 넣기")
-        self.subtitle_check.setText(label)
-        self.subtitle_check.setEnabled(subs is not None)
+        cues = len(self._project.subtitles.cues) if self._source == TIMELINE else 0
+        if self._source == TIMELINE:
+            self.subtitle_check.setText(f"자막 넣기 ({cues}줄)" if cues else "자막 없음 — 컷편집 '자막' 탭에서 만들 수 있습니다")
+        else:
+            self.subtitle_check.setText("자막은 컷편집 타임라인을 내보낼 때 들어갑니다")
+        self.subtitle_check.setEnabled(cues > 0)
         for widget in (self.preview_button, self.export_button):
             widget.setEnabled(ready and not busy)
         self.cancel_button.setVisible(busy)

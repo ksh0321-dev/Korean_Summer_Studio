@@ -4,12 +4,9 @@ from ks_studio.core.subtitles import (
     MIN_CUE,
     CaptionStyle,
     Cue,
-    SubtitleState,
     Subtitles,
     add_cue,
     delete_cue,
-    load_subtitles,
-    save_subtitles,
     to_srt,
     update_cue,
 )
@@ -39,11 +36,14 @@ def test_cue_at_time():
     assert subs.at(0.5) == 0 and subs.at(1.7) == 1 and subs.at(3.0) is None
 
 
-def test_srt_and_roundtrip(tmp_path):
+def test_srt_and_project_roundtrip(tmp_path):
+    """자막은 컷편집 project.json에 (타임라인 시각) 저장된다."""
+    from ks_studio.core.project import Project
+
     subs = Subtitles((Cue(0.5, 1.25, "Did you buy it?"), Cue(2, 3, "  "), Cue(3661.0, 3662.5, "Yes")), CaptionStyle(size=0.07), "transcribe")
     assert to_srt(subs) == "1\n00:00:00,500 --> 00:00:01,250\nDid you buy it?\n\n2\n01:01:01,000 --> 01:01:02,500\nYes\n"
-    path = tmp_path / "subtitles" / "subtitles.json"
-    state = SubtitleState({"recordings/a.mp4": subs}, ("D:/b.mp4",))
-    save_subtitles(path, state)
-    assert load_subtitles(path) == state
-    assert load_subtitles(tmp_path / "none.json") == SubtitleState()
+    path = tmp_path / "project.json"
+    Project(subtitles=subs).save(path)
+    assert Project.load(path).subtitles == subs
+    path.write_text('{"version": 8, "fps": 30, "media": [], "clips": []}', encoding="utf-8")
+    assert Project.load(path).subtitles == Subtitles()  # 자막이 없던 예전 파일

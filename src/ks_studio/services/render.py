@@ -64,7 +64,14 @@ class TimelineRenderer:
         self._pix_fmt = pix_fmt
         self.samples_per_frame = AUDIO_RATE // project.fps
 
-    def frames(self, start: int = 0, with_audio: bool = True) -> Iterator[tuple[int, av.VideoFrame, np.ndarray | None]]:
+    def audio_track(self) -> np.ndarray:
+        """타임라인 전체 소리 (48kHz 모노 float32, 영상은 풀지 않는다) — 자막 음성 인식용."""
+        audio_at = self._audio_mixer(True)
+        mixed = [audio_at(t) for t in range(self._project.duration)]
+        return np.concatenate(mixed) if mixed else np.zeros(0, np.float32)
+
+    def _audio_mixer(self, with_audio: bool):
+        """프레임 t의 소리를 섞어 주는 함수 (frames와 audio_track이 같이 쓴다)."""
         audible = [p for p in self._project.placed() if p.track not in self._project.muted]
         overlaps = self._project.main_overlaps()
         audio_cache: dict[Path, np.ndarray | None] = {}
@@ -82,6 +89,11 @@ class TimelineRenderer:
                     mix += self._audio(audio_cache[path], placed.clip, t - placed.start, crossfade)
             # 여러 소리를 더하면 1.0을 넘을 수 있다 → 넘는 부분만 잘라 찢어지는 소리를 막는다
             return np.clip(mix, -1.0, 1.0, out=mix)
+
+        return audio_at
+
+    def frames(self, start: int = 0, with_audio: bool = True) -> Iterator[tuple[int, av.VideoFrame, np.ndarray | None]]:
+        audio_at = self._audio_mixer(with_audio)
 
         # 원본마다 디코더 하나를 열어 두고 차례로 프레임을 넘긴다 (원본 fps가 높으면 건너뛰고, 낮으면 같은 프레임을 다시 쓴다).
         # 바탕(화면을 덮는 클립)과 겹치는 클립은 변환이 달라서 따로 연다.

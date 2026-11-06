@@ -37,7 +37,6 @@ from ks_studio.ui.export.export_page import ExportPage
 from ks_studio.ui.recorder.close_wait_dialog import CloseWaitDialog
 from ks_studio.ui.recorder.recorder_page import RecorderPage
 from ks_studio.ui.settings.settings_dialog import SettingsDialog
-from ks_studio.ui.subtitle.subtitle_page import SubtitlePage
 from ks_studio.ui.widgets.status_bar import INFO, WARNING, LogBridge, StatusBar
 
 log = logging.getLogger(__name__)
@@ -68,7 +67,6 @@ class MainWindow(QMainWindow):
         self.recorder_page = RecorderPage(devices)
         self.editor_page = EditorPage(self._sources)
         self.beautify_page = BeautifyPage(self._sources, self.editor_page.optimizer)
-        self.subtitle_page = SubtitlePage(self._sources)
         self.export_page = ExportPage(self._sources)
 
         self.stack = QStackedWidget()
@@ -93,7 +91,6 @@ class MainWindow(QMainWindow):
             ("녹화", self.recorder_page),
             ("컷편집", self.editor_page),
             ("AI 보정", self.beautify_page),
-            ("자막", self.subtitle_page),
             ("내보내기", self.export_page),
         ]
         for index, (name, page) in enumerate(pages):
@@ -125,7 +122,7 @@ class MainWindow(QMainWindow):
 
         self.status_bar = StatusBar()
         self.setStatusBar(self.status_bar)
-        for page in (self.recorder_page, self.editor_page, self.beautify_page, self.subtitle_page, self.export_page):
+        for page in (self.recorder_page, self.editor_page, self.beautify_page, self.export_page):
             page.message.connect(self.status_bar.show_message)
             page.indicator.connect(self.status_bar.set_indicator)
         self._log_bridge = LogBridge(self)  # 경고·오류 로그도 상태 표시줄로
@@ -148,7 +145,6 @@ class MainWindow(QMainWindow):
         """편집을 저장하고, 녹화 중이면 멈추고, 마무리할 녹화가 남았으면 끝날 때까지 기다린 뒤 닫는다 (취소 불가)."""
         self.editor_page.deactivate()
         self.beautify_page.deactivate()
-        self.subtitle_page.deactivate()
         self.export_page.deactivate()
         if self.recorder_page.begin_close():
             event.ignore()
@@ -176,8 +172,6 @@ class MainWindow(QMainWindow):
             self.editor_page.deactivate()
         if current is not self.beautify_page:
             self.beautify_page.deactivate()
-        if current is not self.subtitle_page:
-            self.subtitle_page.deactivate()
         if current is not self.export_page:
             self.export_page.deactivate()
         if current is self.recorder_page:
@@ -186,8 +180,6 @@ class MainWindow(QMainWindow):
             self.editor_page.activate(self.settings, self._workspace())
         elif current is self.beautify_page:
             self.beautify_page.activate(self._workspace())
-        elif current is self.subtitle_page:
-            self.subtitle_page.activate(self._workspace())
         elif current is self.export_page:
             self.export_page.activate(self._workspace())
 
@@ -274,7 +266,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         self.recorder_page.deactivate()  # 카메라는 한 곳에서만 열 수 있다
-        dialog = SettingsDialog(self.settings, self._devices, self)
+        dialog = SettingsDialog(self.settings, self._devices, self, shortcuts=self.editor_page.shortcut_catalog())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._apply_settings(dialog.selected_settings())
         dialog.deleteLater()

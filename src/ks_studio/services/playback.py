@@ -23,7 +23,10 @@ from ks_studio.services.sources import AUDIO_RATE, SourceCache
 
 log = logging.getLogger(__name__)
 
-PREVIEW_BOX = (960, 540)  # 미리보기는 결과물 비율을 지킨 채 이 안에 들어가는 크기로 그린다
+PREVIEW_BOX = (960, 540)  # 화면 크기를 알기 전의 미리보기 크기
+# 미리보기는 실제 화면 칸 크기(화소)로 그린다 — 예전엔 늘 960×540 안이라 세로 영상은 304×540을 늘려 흐릿했다.
+# 재생 중엔 이 크기까지만 (그 이상은 줄이는 비용만 늘고 차이가 작다), 멈춘 장면은 칸 크기 그대로. 원본보다 키우지 않는다
+PREVIEW_PLAY_MAX = (1920, 1080)
 QUEUE_FRAMES = 12
 AUDIO_BUFFER_S = 0.2
 BYTES_PER_SAMPLE = 4  # float32 모노
@@ -36,6 +39,7 @@ class Player(QObject):
 
     def __init__(self, sources: SourceCache, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._view_box = PREVIEW_BOX
         self._sources = sources
         self._project = Project()
         self._workspace: Workspace | None = None
@@ -62,6 +66,15 @@ class Player(QObject):
     @property
     def playing(self) -> bool:
         return self._sink is not None
+
+    def set_view_box(self, width: int, height: int) -> None:
+        """미리보기 칸의 실제 화소 크기. 멈춰 있으면 그 크기로 지금 장면을 다시 그린다."""
+        box = (max(2, int(width)), max(2, int(height)))
+        if box == self._view_box:
+            return
+        self._view_box = box
+        if not self.playing:
+            self._request_still()
 
     def set_project(self, project: Project, workspace: Workspace) -> None:
         """편집하면 호출. 재생 중이면 멈추고 현재 위치의 정지 화면을 다시 그린다."""
@@ -128,8 +141,10 @@ class Player(QObject):
 
     # ── 재생 ────────────────────────────────────────────────────
 
-    def _renderer(self) -> TimelineRenderer:
-        size = fit_size(canvas_size(self._project, self._workspace, self._sources), PREVIEW_BOX)
+    def _renderer(self, still: bool = False) -> TimelineRenderer:
+        canvas = canvas_size(self._project, self._workspace, self._sources)
+        box = self._view_box if still else (min(self._view_box[0], PREVIEW_PLAY_MAX[0]), min(self._view_box[1], PREVIEW_PLAY_MAX[1]))
+        size = fit_size(canvas, (min(box[0], canvas[0]), min(box[1], canvas[1])))
         return TimelineRenderer(self._project, self._workspace, self._sources, size, "rgb24")
 
     @staticmethod
@@ -207,7 +222,7 @@ class Player(QObject):
         while True:
             self._still_event.wait()
             self._still_event.clear()
-            target, renderer = self._still_request, self._renderer()
+            target, renderer = self._still_request, self._renderer(still=True)
             try:
                 item = next(renderer.frames(target, with_audio=False), None)
             except Exception:

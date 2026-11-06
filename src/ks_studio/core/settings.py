@@ -70,6 +70,7 @@ class AppSettings:
     media_import: str = MEDIA_COPY
     recent_projects: list[str] = field(default_factory=list)  # 최근에 연 프로젝트 폴더, 최신 순
     sync_calibrations: list[SyncCalibration] = field(default_factory=list)
+    shortcuts: dict[str, list[str]] = field(default_factory=dict)  # 컷편집 단축키 중 바꾼 것만: 동작 이름 → 키 (빈 목록 = 없음)
 
     @property
     def sync_calibration(self) -> SyncCalibration | None:

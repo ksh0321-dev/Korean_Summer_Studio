@@ -51,6 +51,13 @@ def load_audio(path: Path) -> np.ndarray:
     return np.concatenate(chunks).astype(np.float32) / 32768 if chunks else np.zeros(0, np.float32)
 
 
+def resample_48k(audio: np.ndarray) -> np.ndarray:
+    """48kHz → 16kHz (음성 인식 입력)."""
+    from scipy.signal import resample_poly
+
+    return resample_poly(audio.astype(np.float32), 1, 3).astype(np.float32)
+
+
 def clean(segments, duration: float) -> list[Cue]:
     """faster-whisper 구간 → 자막 줄. 빈 글, 영상 끝 뒤, 바로 앞과 같은 문장(지어낸 반복)은 버린다."""
     cues: list[Cue] = []
@@ -79,9 +86,10 @@ class SpeechWorker(QObject):
         self.busy_with: Path | None = None
         threading.Thread(target=self._worker, daemon=True, name="speech").start()
 
-    def request(self, path: Path, task: str) -> None:
+    def request(self, path: Path, task: str, audio_fn=None) -> None:
+        """path의 소리를 알아듣는다. audio_fn을 주면 그 함수가 돌려준 소리(48kHz 모노 float32)로 (컷편집 타임라인)."""
         self.busy_with = path
-        self._jobs.put((path, task))
+        self._jobs.put((path, task, audio_fn))
 
     def _load(self, path: Path):
         if self._model is None:
@@ -99,11 +107,11 @@ class SpeechWorker(QObject):
 
     def _worker(self) -> None:
         while True:
-            path, task = self._jobs.get()
+            path, task, audio_fn = self._jobs.get()
             try:
                 model = self._load(path)
                 self.status.emit(path, "소리 읽는 중…")
-                audio = load_audio(path)
+                audio = load_audio(path) if audio_fn is None else resample_48k(audio_fn())
                 duration = len(audio) / SAMPLE_RATE
                 if duration == 0:
                     raise RuntimeError("소리가 없는 영상입니다")

@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
+    QTabWidget,
 )
 
 from ks_studio.core.settings import MEDIA_COPY, MEDIA_REFERENCE, AppSettings, DeviceRef, match_device
@@ -29,6 +31,7 @@ from ks_studio.services.devices import (
     find_microphone,
     microphone_refs,
 )
+from ks_studio.ui.settings.shortcuts import ShortcutTab
 from ks_studio.ui.widgets.level_meter import LevelMeter
 from ks_studio.ui.widgets.video_view import VideoView
 
@@ -49,7 +52,8 @@ def _fill(combo: QComboBox, refs: list[DeviceRef], selected: DeviceRef | None) -
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: AppSettings, devices: DeviceMonitor, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: AppSettings, devices: DeviceMonitor, parent: QWidget | None = None,
+                 shortcuts: list | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("설정")
         self.resize(960, 680)
@@ -101,9 +105,17 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
+        devices_tab = QWidget()
+        devices_layout = QVBoxLayout(devices_tab)
+        devices_layout.addLayout(form)
+        devices_layout.addLayout(previews, 1)
+        tabs = QTabWidget()
+        tabs.addTab(devices_tab, "장치 · 가져오기")
+        self.shortcut_tab = ShortcutTab(shortcuts, settings.shortcuts) if shortcuts else None
+        if self.shortcut_tab is not None:
+            tabs.addTab(self.shortcut_tab, "단축키 (컷편집)")
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addLayout(previews, 1)
+        layout.addWidget(tabs, 1)
         layout.addWidget(buttons)
 
         _fill(self.camera_combo, camera_refs(), settings.camera)
@@ -117,7 +129,14 @@ class SettingsDialog(QDialog):
             camera=self.camera_combo.currentData(),
             microphone=self.mic_combo.currentData(),
             media_import=self.import_combo.currentData(),
+            shortcuts=self.shortcut_tab.overrides() if self.shortcut_tab is not None else self._settings.shortcuts,
         )
+
+    def accept(self) -> None:
+        if self.shortcut_tab is not None and self.shortcut_tab.problems():
+            QMessageBox.warning(self, "단축키", "같은 키를 쓰는 기능이 있습니다. 단축키 탭에서 하나를 바꿔 주세요.")
+            return
+        super().accept()
 
     def done(self, result: int) -> None:
         self._preview.stop()

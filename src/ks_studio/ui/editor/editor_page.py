@@ -11,11 +11,14 @@ import shutil
 import threading
 import time
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractButton,
+    QAbstractItemView,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -26,6 +29,8 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QFileDialog,
+    QTabWidget,
 )
 
 from ks_studio.core.edits import (
@@ -46,6 +51,7 @@ from ks_studio.core.edits import (
     set_clip_props,
     set_fps,
     set_linked,
+    set_subtitles,
     split,
     toggle_marker,
     toggle_track,
@@ -61,7 +67,11 @@ from ks_studio.services.optimize import Optimizer, Plan, inspect
 from ks_studio.services.playback import Player
 from ks_studio.services.render import canvas_size, layer_rect
 from ks_studio.services.sources import SourceCache, optimized_path, probe
+from ks_studio.core.subtitles import to_srt
+from ks_studio.services.render import TimelineRenderer
+from ks_studio.ui.editor.caption_panel import CaptionPanel
 from ks_studio.ui.editor.export_dialog import ExportDialog
+from ks_studio.ui.settings.shortcuts import shortcut_name
 from ks_studio.ui.editor.inspector import Inspector
 from ks_studio.ui.editor.media_bin import BinItem, MediaBin
 from ks_studio.ui.editor.silence_dialog import SilenceDialog
@@ -73,6 +83,7 @@ from ks_studio.ui.widgets.video_view import VideoView
 log = logging.getLogger(__name__)
 AUTOSAVE_MS = 2000
 DISSOLVE_MS = 500  # 디졸브 버튼의 기본 길이
+CAPTION_KEY = Path("<timeline>")  # 음성 인식 작업 이름 (타임라인 소리)
 REMOVE_RETRY_MS, REMOVE_RETRIES = 3000, 5  # 워크스페이스에서 뺄 때 잠깐 열려 있던 파일 다시 지우기
 
 
@@ -170,7 +181,17 @@ class EditorPage(QWidget):
         self.timeline.media_dropped.connect(lambda path, track, position: self._insert_media(Path(path), track, position))
         self.inspector.offset_changed.connect(lambda clip_id, ms: self._apply(set_audio_offset(self.project, clip_id, ms)))
         self.inspector.prop_changed.connect(self._change_clip_prop)
-        self.view.installEventFilter(self)  # 미리보기에서 끌기·Ctrl+휠로 화면 속 화면 조절
+        self.view.installEventFilter(self)  # 미리보기에서 끌기·Ctrl+휠로 화면 속 화면 조절, 크기 바뀜
+        for kind in (QAbstractButton, QAbstractItemView, QComboBox):  # 스페이스(재생)·화살표(프레임 이동)를 가로채지 않게
+            for widget in self.findChildren(kind):
+                widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._view_resize_timer = QTimer(self)
+        self._view_resize_timer.setSingleShot(True)
+        self._view_resize_timer.setInterval(150)
+        self._view_resize_timer.timeout.connect(
+            lambda: self.player.set_view_box(self.view.width() * self.view.devicePixelRatioF(),
+                                             self.view.height() * self.view.devicePixelRatioF())
+        )
         self._view_drag: dict | None = None
         self.bin.add_requested.connect(lambda path: self.append_media(Path(path)))
         self.bin.import_requested.connect(self._import)
@@ -181,6 +202,7 @@ class EditorPage(QWidget):
         self.optimizer.failed.connect(self._on_optimize_failed)
         self._copier.failed.connect(self._on_copy_failed)
 
+        self._shortcuts: dict[str, tuple] = {}  # 이름 → (동작, 기본 키, 설명)
         toolbar = self._build_toolbar()
 
         transport = QHBoxLayout()
@@ -204,15 +226,28 @@ class EditorPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.addWidget(stage_layout(left=self.bin, center=center, right=self.inspector, bottom=bottom))
+        self.captions = CaptionPanel()
+        self.captions.edited.connect(lambda subs: self._apply(set_subtitles(self.project, subs)))
+        self.captions.seek_requested.connect(lambda seconds: self.player.seek(round(seconds * self.project.fps)))
+        self.captions.generate_requested.connect(self._generate_captions)
+        self.captions.srt_requested.connect(self._save_srt)
+        self.timeline.caption_clicked.connect(self._on_caption_clicked)
+        self._speech = None  # 음성 인식 (처음 쓸 때 연다)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.addTab(self.inspector, "속성")
+        self.right_tabs.addTab(self.captions, "자막")
+        layout.addWidget(stage_layout(left=self.bin, center=center, right=self.right_tabs, bottom=bottom))
         self._refresh()
 
     def _action(self, text: str, tip: str, slot, keys: tuple[str, ...] = (), checkable: bool = False) -> QAction:
-        """도구모음 버튼과 단축키를 함께 만드는 동작. 페이지에 붙여 두므로 버튼이 없어도 단축키가 동작한다."""
+        """도구모음 버튼과 단축키를 함께 만드는 동작. 페이지에 붙여 두므로 버튼이 없어도 단축키가 동작한다.
+
+        단축키는 ⚙ 설정의 '단축키' 탭에서 바꾼다 — 이름(버튼 글자에서 기호를 뺀 것)으로 저장한다.
+        """
         action = QAction(text, self)
-        action.setShortcuts([QKeySequence(k) for k in keys])
-        names = " / ".join(QKeySequence(k).toString(QKeySequence.SequenceFormat.NativeText) for k in keys)
-        action.setToolTip(f"{tip}  [{names}]" if keys else tip)
+        name = shortcut_name(text)
+        self._shortcuts[name] = (action, tuple(keys), tip)
+        self._set_keys(name, list(keys))
         action.setCheckable(checkable)
         if checkable:
             action.toggled.connect(slot)
@@ -220,6 +255,20 @@ class EditorPage(QWidget):
             action.triggered.connect(lambda _checked=False: slot())
         self.addAction(action)
         return action
+
+    def _set_keys(self, name: str, keys: list[str]) -> None:
+        action, _defaults, tip = self._shortcuts[name]
+        action.setShortcuts([QKeySequence(k) for k in keys])
+        shown = " / ".join(QKeySequence(k).toString(QKeySequence.SequenceFormat.NativeText) for k in keys)
+        action.setToolTip(f"{tip}  [{shown}]" if keys else tip)
+
+    def shortcut_catalog(self) -> list[tuple[str, str, tuple[str, ...]]]:
+        """설정 창에 보일 단축키 목록: (이름, 설명, 기본 키)."""
+        return [(name, tip, defaults) for name, (_action, defaults, tip) in self._shortcuts.items()]
+
+    def apply_shortcuts(self, overrides: dict[str, list[str]]) -> None:
+        for name, (_action, defaults, _tip) in self._shortcuts.items():
+            self._set_keys(name, list(overrides.get(name, defaults)))
 
     def _build_toolbar(self) -> QWidget:
         """타임라인 위 도구모음: [편집] | [구간] | [이동] ··· [보기]."""
@@ -302,6 +351,7 @@ class EditorPage(QWidget):
 
     def activate(self, settings: AppSettings, workspace: Workspace) -> None:
         self._settings = settings
+        self.apply_shortcuts(settings.shortcuts)
         self._active = True
         if workspace != self._workspace:
             self.save()
@@ -354,6 +404,8 @@ class EditorPage(QWidget):
         if self._workspace is not None:
             self.timeline.set_project(self.project, self._workspace, fit=fit)
             self.player.set_project(self.project, self._workspace)
+        self.captions.set_subtitles(self.project.subtitles)
+        self._show_caption(self.player.position)
         self.export_button.setEnabled(self.project.duration > 0)
         self.fps_combo.blockSignals(True)
         self.fps_combo.setCurrentIndex(max(0, self.fps_combo.findData(self.project.fps)))
@@ -764,6 +816,9 @@ class EditorPage(QWidget):
         if watched is not self.view:
             return False
         kind = event.type()
+        if kind == QEvent.Type.Resize:  # 미리보기를 칸의 실제 화소 크기로 (창 크기를 바꾸는 동안은 잠깐 모아서)
+            self._view_resize_timer.start()
+            return False
         if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             target = self._screen_target()
             if target is not None:
@@ -795,7 +850,62 @@ class EditorPage(QWidget):
                 return True
         return False
 
+    def _show_caption(self, frame: int) -> None:
+        """미리보기에 그 시각의 자막 (내보낼 때 굽는 것과 같은 모양) · '자막' 탭에서 그 줄을 칠한다."""
+        subs, seconds = self.project.subtitles, frame / self.project.fps
+        index = subs.at(seconds)
+        self.view.set_caption(subs.cues[index].text if index is not None else "", subs.style)
+        self.captions.set_time(seconds)
+
+    # ── 자막 ────────────────────────────────────────────────────
+
+    def _on_caption_clicked(self, index: int) -> None:
+        self.right_tabs.setCurrentWidget(self.captions)
+        self.captions.select(index)
+
+    def _generate_captions(self, task: str) -> None:
+        """타임라인 소리 전체를 알아들어 자막을 만든다 (지금 자막은 바뀐다 — Ctrl+Z로 되돌릴 수 있다)."""
+        from ks_studio.services.speech import speech_unavailable_reason
+
+        reason = speech_unavailable_reason()
+        if reason is not None:
+            self.captions.show_progress(reason)
+            return
+        if self.project.duration == 0 or self._workspace is None:
+            self.captions.show_progress("타임라인에 영상을 먼저 넣으세요")
+            return
+        if self._speech is None:
+            from ks_studio.services.speech import SpeechWorker
+
+            self._speech = SpeechWorker(self)
+            self._speech.status.connect(lambda _key, text: self.captions.show_progress(text, 0.0))
+            self._speech.progress.connect(lambda _key, r: self.captions.show_progress(f"말 알아듣는 중… {int(r * 100)}%", r))
+            self._speech.done.connect(self._on_captions_made)
+            self._speech.failed.connect(lambda _key, reason: self.captions.show_progress(f"⚠ 실패: {reason}"))
+        project, workspace = self.project, self._workspace
+        renderer = TimelineRenderer(project, workspace, self._sources, (64, 36), "rgb24")
+        self._caption_task = task
+        self.captions.show_progress("타임라인 소리 모으는 중…", 0.0)
+        self._speech.request(CAPTION_KEY, task, audio_fn=renderer.audio_track)
+
+    def _on_captions_made(self, _key, cues: list) -> None:
+        subs = replace(self.project.subtitles, cues=tuple(cues), task=self._caption_task)
+        self._apply(set_subtitles(self.project, subs))
+        self.captions.show_progress(f"자막 {len(cues)}줄을 만들었습니다. 표에서 고치세요 (음악만 나오는 곳에 지어낸 줄이 있으면 지우세요)")
+        self.right_tabs.setCurrentWidget(self.captions)
+
+    def _save_srt(self) -> None:
+        if self._workspace is None:
+            return
+        default = str(self._workspace.exports_dir / f"{self._workspace.root.name}.srt")
+        path, _ = QFileDialog.getSaveFileName(self, "SRT로 저장", default, "자막 (*.srt)")
+        if path:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(to_srt(self.project.subtitles), encoding="utf-8")
+            self.message.emit(f"SRT 저장: {Path(path).name}", INFO)
+
     def _on_position(self, frame: int) -> None:
+        self._show_caption(frame)
         fps = self.project.fps
         self.timeline.set_playhead(frame)
         self.time_label.setText(f"{format_frames(frame, fps)} / {format_frames(self.project.duration, fps)}")

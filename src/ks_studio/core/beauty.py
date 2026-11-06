@@ -9,6 +9,7 @@
   피부    매끈하게(피부만 흐리게) · 잡티 제거(주변보다 작고 어두운 점을 메꿈) · 톤 밝게 · 다크서클(눈 밑 타원을 밝게)
   얼굴형  얼굴 갸름(볼 아래~턱선을 가운데 선 쪽으로) · 광대 축소(눈 옆 윤곽을 안쪽으로) · 턱 길이(턱 끝을 위/아래로)
           · 눈 키우기(눈 가운데 확대) · 콧볼 축소(콧볼을 코 가운데로) · 코 길이(코 아래쪽을 위로) · 웃는 입(입꼬리를 위로)
+          · 얼굴 작게(얼굴 영역만 가운데로 줄이고, 줄어 생긴 틈은 둘레(배경·머리카락·목)로 메꾼다 — 배경은 그대로)
   메이크업 블러셔('볼 사과' 타원에 색) · 윤곽(광대 아래·코 옆은 어둡게, 콧대·이마·턱 끝은 밝게) · 아이섀도(눈두덩에 색)
           · 립 컬러(입술 색만 바꾸고 결은 그대로) · 치아 미백 · 눈 또렷하게(눈 안을 선명하게)
 여기서는 '점을 어디로 당길지(Pull)·어디를 키울지(Zoom)·어느 영역(다각형·타원)'만 정한다.
@@ -52,6 +53,7 @@ FOREHEAD_LIFT = 0.25  # 피부 영역을 눈썹 위로 눈 사이 거리의 25%�
 CHEEKBONE_MAX, CHEEKBONE_RADIUS = 0.05, 0.3
 CHIN_MAX, CHIN_RADIUS = 0.08, 0.35  # 강도 ±100%일 때 턱 끝이 눈 사이 거리의 8%만큼 아래(+)/위(-)로
 NOSE_LENGTH_MAX = 0.12  # 강도 100%일 때 코 아래쪽이 (두 눈 가운데~코 아래) 거리의 12%만큼 올라간다
+FACE_SMALL_MAX = 0.08  # 강도 100%일 때 얼굴이 8% 작아진다 (틈을 메우는 폭도 그만큼이라 너무 키우면 메운 티가 난다)
 EYE_ZOOM_MAX, EYE_ZOOM_RADIUS = 0.15, 1.0  # 강도 100%일 때 눈 가운데가 1/(1-0.15)≈1.18배 · 범위 = 눈 가로 길이 × 1.0
 UNDER_EYE = (0.45, 0.55, 0.22)  # 다크서클 타원: 눈 가운데에서 아래로 눈 가로 × 0.45, 반지름 가로 0.55 · 세로 0.22
 NOSE_BOTTOM = (76, 77, 78, 79, 80, 85, 84, 83, 82, 86)  # 코 옆 아래~콧볼·콧구멍 (잡티 제거에서 뺀다 — 콧구멍·콧볼 그늘도 '어두운 점')
@@ -71,7 +73,7 @@ EYESHADOW_COLORS = {  # 칸 값 → (이름, RGB)
 }
 EFFECTS = (  # BeautySettings의 효과 세기 칸 (chin만 -1~1, 나머지 0~1)
     "smooth", "blemish", "brighten", "dark_circle",
-    "slim", "cheekbone", "chin", "eyes", "nose_slim", "nose_length", "smile",
+    "slim", "cheekbone", "chin", "eyes", "nose_slim", "nose_length", "smile", "face_small",
     "blush", "contour", "eyeshadow", "lip", "teeth", "eye_clear",
 )
 PRESET_FIELDS = (*EFFECTS, "eyeshadow_color")  # 프리셋에 담는 칸 (효과 세기 + 색)
@@ -90,6 +92,7 @@ class BeautySettings:
     nose_slim: float = 0.0  # 콧볼 축소
     nose_length: float = 0.0  # 코 길이 줄이기
     smile: float = 0.0  # 웃는 입
+    face_small: float = 0.0  # 얼굴 작게
     blush: float = 0.0  # 블러셔
     contour: float = 0.0  # 윤곽 메이크업 (쉐딩·하이라이트)
     eyeshadow: float = 0.0  # 아이섀도
@@ -264,6 +267,20 @@ class Zoom:
     cy: float
     radius: float
     amount: float
+
+
+def face_outline(lm: np.ndarray) -> np.ndarray:
+    """얼굴 작게가 줄이는 영역: 윤곽 + 눈썹 (이마 위·머리카락은 넣지 않는다 — 머리카락을 가로질러 자르면 선이 보였다)."""
+    return hull(np.concatenate([lm[list(CONTOUR)], *(lm[list(b)] for b in BROWS)]))
+
+
+def face_small_scale(lm: np.ndarray, strength: float) -> tuple[float, float, float] | None:
+    """얼굴 작게: (가운데 x, 가운데 y, 배율). 가운데 = 두 눈 가운데와 턱 끝 사이(눈 쪽 40%) — 얼굴이 고르게 줄어든다."""
+    if strength <= 0:
+        return None
+    top, _ = _face_axis(lm)
+    center = top + (lm[CHIN] - top) * 0.4
+    return float(center[0]), float(center[1]), 1.0 - FACE_SMALL_MAX * min(1.0, strength)
 
 
 def eye_width(lm: np.ndarray, side: int) -> float:

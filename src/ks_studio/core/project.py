@@ -21,10 +21,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ks_studio.core.jsonio import write_json_atomic
+from ks_studio.core.subtitles import Subtitles
 
 PROJECT_FPS = 30
 TIMELINE_FPS_CHOICES = (30, 60)
-FILE_VERSION = 8  # 2: 위 줄 · 3: 줄 음소거·숨김 · 4: 영상 줄 개수 · 5: 연동 · 6: 볼륨·페이드 · 7: 화면 속 화면·디졸브·마커 · 8: 뺀 녹화본
+FILE_VERSION = 9  # 2: 위 줄 · 3: 줄 음소거·숨김 · 4: 영상 줄 개수 · 5: 연동 · 6: 볼륨·페이드 · 7: 화면 속 화면·디졸브·마커 · 8: 뺀 녹화본 · 9: 자막
 MAIN_TRACK = 1
 DEFAULT_VIDEO_TRACKS = 3  # 새 프로젝트의 영상 줄 수 (V1~V3)
 MIN_VIDEO_TRACKS = 2  # 이보다 적게는 지울 수 없다
@@ -113,6 +114,9 @@ class Project:
     linked: bool = True  # 연동: V1이 바뀌면 위 줄 클립이 아래 V1 장면을 따라간다 (core.edits.follow_main)
     markers: tuple[int, ...] = ()  # 타임라인 프레임
     removed: tuple[str, ...] = ()  # 워크스페이스 목록에서 뺀 녹화본 (파일은 그대로 — 원본이므로)
+    # 자막: 타임라인 시각(초)의 자막 줄 + 모양. 영상에 굽지 않고 들고 있다가 내보낼 때 입힌다
+    # (AI 얼굴 보정은 자막 없는 영상에 해야 하므로 컷편집 결과에 자막을 굽지 않는다). 연동이 켜져 있으면 V1을 따라간다
+    subtitles: Subtitles = field(default_factory=Subtitles)
 
     def length(self, clip: Clip) -> int:
         """클립이 타임라인에서 차지하는 프레임 수 (최소 1)."""
@@ -252,4 +256,5 @@ class Project:
             linked=data.get("linked", True),  # 버전 4까지는 없다
             markers=tuple(data.get("markers", [])),  # 버전 6까지는 없다
             removed=tuple(data.get("removed", [])),  # 버전 7까지는 없다
+            subtitles=Subtitles.from_dict(data.get("subtitles", {})),  # 버전 8까지는 없다
         )

@@ -28,7 +28,8 @@ from ks_studio.core.workspace import Workspace
 from ks_studio.services.sources import SourceCache
 
 MIME_MEDIA = "application/x-ks-media"
-RULER_H, ROW_H, AUDIO_H, GAP = 24, 56, 44, 4
+TICKS_H, CAPTION_H = 24, 18  # 눈금자 띠 아래에 자막 띠 (자막 블록 = 자막 한 줄)
+RULER_H, ROW_H, AUDIO_H, GAP = TICKS_H + CAPTION_H, 56, 44, 4  # RULER_H = 줄이 시작하는 높이 (눈금자 + 자막 띠)
 HEADER_W = 72  # 왼쪽 줄 이름 칸 (줄 이름 + 👁·🔊 버튼)
 BUTTON_W, BUTTON_H = 30, 24
 WAVE_H = 16  # 위 줄 클립 아래쪽 파형 띠
@@ -43,7 +44,7 @@ RANGE_BAR, RANGE_SHADE = QColor("#3fd1c7"), QColor(63, 209, 199, 28)
 ZOOM_STEP = 1.25
 WAVE_ON, WAVE_MUTED = QColor("#2ecc71"), QColor("#5c5c66")
 HIDDEN_SHADE = QColor(22, 22, 26, 170)
-ADD_BUTTON = QRectF(4, 2, HEADER_W - 8, RULER_H - 4)  # 왼쪽 위 [+ 줄]
+ADD_BUTTON = QRectF(4, 2, HEADER_W - 8, TICKS_H - 4)  # 왼쪽 위 [+ 줄]
 SCROLLBAR_W = 12
 AUTOSCROLL_PX = 12  # 끌다가 위아래 끝에서 이 거리 안이면 자동 스크롤
 
@@ -67,6 +68,7 @@ class TimelineWidget(QWidget):
     track_toggled = Signal(int, str)  # 줄, "hide" 또는 "mute"
     track_delete_requested = Signal(int)  # 줄 (확인 창은 받는 쪽에서)
     clip_menu_requested = Signal(QPoint)  # 클립·빈 곳 우클릭 (화면 좌표). 메뉴는 편집 화면이 만든다
+    caption_clicked = Signal(int)  # 자막 띠에서 누른 자막 줄 번호
 
     def __init__(self, sources: SourceCache, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -306,8 +308,9 @@ class TimelineWidget(QWidget):
         painter.setClipRect(QRectF(HEADER_W, 0, self.width(), self.height()))
         self._paint_ruler(painter)
         self._paint_markers(painter)
+        self._paint_captions(painter, project)
         if range_x is not None:
-            painter.fillRect(QRectF(range_x[0], RULER_H - 5, max(2.0, range_x[1] - range_x[0]), 5), RANGE_BAR)
+            painter.fillRect(QRectF(range_x[0], TICKS_H - 5, max(2.0, range_x[1] - range_x[0]), 5), RANGE_BAR)
         painter.setClipping(False)
         self._paint_headers(painter)
 
@@ -326,8 +329,9 @@ class TimelineWidget(QWidget):
         painter.drawRoundedRect(ADD_BUTTON, 4, 4)
         painter.setPen(QColor("#ffffff"))
         painter.drawText(ADD_BUTTON, Qt.AlignmentFlag.AlignCenter, "+ 줄")
-        painter.setClipRect(QRectF(0, RULER_H, HEADER_W, self.height()))
         painter.setPen(QColor("#9a9aa3"))
+        painter.drawText(QRectF(0, TICKS_H, HEADER_W, CAPTION_H), Qt.AlignmentFlag.AlignCenter, "자막")
+        painter.setClipRect(QRectF(0, RULER_H, HEADER_W, self.height()))
         painter.drawText(QRectF(0, self._audio_top(), HEADER_W, AUDIO_H), Qt.AlignmentFlag.AlignCenter, "A1")
         for track in range(1, self._project.video_tracks + 1):
             painter.setPen(QColor("#9a9aa3"))
@@ -354,8 +358,8 @@ class TimelineWidget(QWidget):
         frame = first
         while self._x(frame) < self.width():
             x = self._x(frame)
-            painter.drawLine(QPointF(x, RULER_H - 6), QPointF(x, RULER_H))
-            painter.drawText(QPointF(x + 3, RULER_H - 9), format_frames(frame, fps, with_frames=step < fps))
+            painter.drawLine(QPointF(x, TICKS_H - 6), QPointF(x, TICKS_H))
+            painter.drawText(QPointF(x + 3, TICKS_H - 9), format_frames(frame, fps, with_frames=step < fps))
             frame += step
 
     def _paint_transitions(self, painter: QPainter, project: Project) -> None:
@@ -372,6 +376,37 @@ class TimelineWidget(QWidget):
             painter.drawLine(rect.topLeft(), rect.bottomRight())
             painter.drawLine(rect.bottomLeft(), rect.topRight())
             painter.drawRect(rect)
+
+    def _caption_rect(self, project: Project, cue) -> QRectF:
+        fps = project.fps
+        x0, x1 = self._x(cue.start * fps), self._x(cue.end * fps)
+        return QRectF(x0, TICKS_H + 2, max(3.0, x1 - x0), CAPTION_H - 4)
+
+    def _paint_captions(self, painter: QPainter, project: Project) -> None:
+        """자막 띠: 자막 줄마다 블록 (글은 들어가는 만큼). 누르면 그 자막으로 간다 — 고치기는 오른쪽 '자막' 탭."""
+        painter.fillRect(QRectF(HEADER_W, TICKS_H, self.width(), CAPTION_H), QColor("#14141a"))
+        font = painter.font()
+        font.setPixelSize(11)
+        painter.setFont(font)
+        for cue in project.subtitles.cues:
+            rect = self._caption_rect(project, cue)
+            if rect.right() < HEADER_W or rect.left() > self.width():
+                continue
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#3d6b8f"))
+            painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(rect.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter, cue.text)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _caption_at(self, x: float, y: float) -> int | None:
+        if not TICKS_H <= y < RULER_H:
+            return None
+        project = self._project
+        for i, cue in enumerate(project.subtitles.cues):
+            if self._caption_rect(project, cue).adjusted(-2, -4, 2, 4).contains(QPointF(x, y)):
+                return i
+        return None
 
     def _paint_markers(self, painter: QPainter) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
@@ -538,6 +573,11 @@ class TimelineWidget(QWidget):
                 self.track_toggled.emit(*button)
             elif ADD_BUTTON.contains(QPointF(x, y)):
                 self.edited.emit(add_track(self._project, self._project.video_tracks + 1))
+            return
+        caption = self._caption_at(x, y)
+        if caption is not None:  # 자막 블록: 그 자막 시작으로 가고 '자막' 탭에서 그 줄을 고른다
+            self.seek_requested.emit(round(self._project.subtitles.cues[caption].start * self._project.fps))
+            self.caption_clicked.emit(caption)
             return
         hit = self._hit(x, y)
         adding = bool(event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))

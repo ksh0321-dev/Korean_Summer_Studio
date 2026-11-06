@@ -284,3 +284,23 @@ def test_side_by_side_clip_has_range_both_halves_and_sound(tmp_path):
     y, x = round(cheek.cy), round(cheek.cx)
     assert abs(left[y, x] - GRAY).max() < 8 and right[y, x, 0] > right[y, x, 2] + 10  # 오른쪽만 블러셔
     assert abs(float(audio_seconds) - 0.5) < 0.1  # 15장 = 0.5초
+
+
+def test_face_small_shrinks_face_but_never_warps_background():
+    """얼굴 작게: 얼굴 안의 원이 작아지고, 원래 얼굴 영역 밖(배경 줄무늬)은 화소 하나 바뀌지 않는다."""
+    from ks_studio.core.beauty import face_small_scale, skin_polygon
+
+    lm = fake_face()
+    image = np.full((1000, 1000, 3), GRAY, np.uint8)
+    image[:, ::20] = 30  # 세로 줄무늬 배경 — 휘면 바로 드러난다
+    cx, cy, _ = face_small_scale(lm, 1.0)
+    face_area = np.zeros(image.shape[:2], np.uint8)
+    cv2.fillPoly(face_area, [skin_polygon(lm).astype(np.int32)], 1)
+    image[face_area > 0] = (200, 160, 140)  # 얼굴 피부
+    cv2.circle(image, (round(cx), round(cy)), 150, (0, 0, 0), 3)  # 얼굴 안의 원
+    out = apply(image, lm, BeautySettings(face_small=1.0))
+    row = round(cy)
+    width = lambda a: np.ptp(np.flatnonzero(a[row, 300:700, 0] < 64))  # noqa: E731
+    assert width(out) < width(image) * 0.95  # 얼굴(안의 원)이 작아졌다
+    outside = cv2.dilate(face_area, np.ones((15, 15), np.uint8)) == 0
+    assert (out[outside] == image[outside]).all()  # 원래 얼굴 영역 밖 배경은 그대로

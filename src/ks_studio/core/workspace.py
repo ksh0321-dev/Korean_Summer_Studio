@@ -11,7 +11,6 @@
 <root>/exports/final/                      내보내기 탭의 최종 영상
 <root>/ai/<이름>_보정.mp4                    AI 보정본 (워크스페이스에 녹화본처럼 보인다)
 <root>/ai/settings.json                    AI 보정 설정 (원본마다)
-<root>/subtitles/subtitles.json            자막 (영상마다)
 <root>/.test/test.mkv, test.mp4            5초 테스트 녹화 (매번 덮어씀)
 <root>/.test/sync_calibration.mp4          박수 싱크 보정용 녹화 (매번 덮어씀)
 """
@@ -68,10 +67,6 @@ class Workspace:
     def ai_output(self, source: str) -> Path:
         """원본의 AI 보정본 자리."""
         return self.ai_dir / f"{Path(source).stem}_보정.mp4"
-
-    @property
-    def subtitles_file(self) -> Path:
-        return self.root / "subtitles" / "subtitles.json"
 
     @property
     def final_dir(self) -> Path:

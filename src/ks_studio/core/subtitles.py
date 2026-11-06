@@ -1,14 +1,10 @@
 """자막: 영상 하나의 자막 줄(시작·끝·글) 목록과 모양. 순수 파이썬 — Qt·영상 처리 없음.
 
-저장: <프로젝트>/subtitles/subtitles.json — 영상(source 문자열)마다. 영상 파일에 굽지 않고 들고 있다가 내보낼 때 입힌다.
+저장: 컷편집 project.json (타임라인 시각, 초). 영상 파일에 굽지 않고 들고 있다가 내보낼 때 입힌다.
 외국인 대상 콘텐츠라 기본은 영어 자막 (한국어로 말한 것도 영어로 옮긴다).
 """
 
-import json
-from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
-
-from ks_studio.core.jsonio import write_json_atomic
+from dataclasses import asdict, dataclass, replace
 
 MIN_CUE = 0.3  # 자막 한 줄의 가장 짧은 길이 (초)
 NEW_CUE = 2.0  # 새로 넣는 자막 줄 길이
@@ -96,26 +92,3 @@ def to_srt(subs: Subtitles) -> str:
     """SRT 파일 내용 (인스타그램·유튜브에 따로 올릴 때). 빈 줄은 뺀다."""
     blocks = [c for c in subs.cues if c.text.strip()]
     return "\n".join(f"{i}\n{srt_time(c.start)} --> {srt_time(c.end)}\n{c.text.strip()}\n" for i, c in enumerate(blocks, 1))
-
-
-@dataclass(frozen=True)
-class SubtitleState:
-    """자막 탭의 저장 내용."""
-
-    docs: dict = field(default_factory=dict)  # 영상(source) → Subtitles
-    imported: tuple[str, ...] = ()  # 자막 탭에서 직접 가져온 영상
-
-    def for_source(self, source: str) -> Subtitles:
-        return self.docs.get(source, Subtitles())
-
-
-def load_subtitles(path: Path) -> SubtitleState:
-    if not path.exists():
-        return SubtitleState()
-    data = json.loads(path.read_text(encoding="utf-8"))
-    docs = {k: Subtitles.from_dict(v) for k, v in data.get("docs", {}).items()}
-    return SubtitleState(docs, tuple(data.get("imported", [])))
-
-
-def save_subtitles(path: Path, state: SubtitleState) -> None:
-    write_json_atomic(path, {"docs": {k: v.to_dict() for k, v in state.docs.items()}, "imported": list(state.imported)})
