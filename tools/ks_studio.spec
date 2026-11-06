@@ -29,7 +29,7 @@ binaries += collect_dynamic_libs("ctranslate2")
 binaries += collect_dynamic_libs("onnxruntime")
 
 datas = []
-datas += collect_data_files("ks_studio", includes=["ui/theme/*.qss", "assets/fonts/*"])
+datas += collect_data_files("ks_studio", includes=["ui/theme/*.qss", "assets/fonts/*", "assets/icon.*"])
 datas += collect_data_files("faster_whisper")  # 말소리 구간 찾기 모델 (silero_vad)
 datas += collect_data_files("insightface")
 
@@ -50,6 +50,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="KS Studio",
+    icon=str(ROOT / "src" / "ks_studio" / "assets" / "icon.ico"),  # 탐색기·작업 표시줄의 exe 아이콘
     console=False,  # 터미널 창 없이 (로그는 user/logs/)
     upx=False,  # CUDA DLL을 압축하면 깨지거나 느려진다
 )

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication, QStyle
 
 from ks_studio.app.fonts import family, register_fonts
@@ -17,6 +17,7 @@ from ks_studio.services.devices import DeviceMonitor
 from ks_studio.ui.main_window import MainWindow
 
 THEME_PATH = Path(__file__).resolve().parent.parent / "ui" / "theme" / "dark.qss"
+ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
 WINDOW_FILL = 0.85  # 처음 창 크기 = 모니터 작업 영역의 85%
 
 
@@ -50,6 +51,7 @@ def main() -> int:
         return run()
     app = QApplication(sys.argv)
     app.setApplicationName("KS Studio")
+    app.setWindowIcon(QIcon(str(ICON_PATH)))  # 창 제목줄·작업 표시줄 (exe 파일 아이콘은 빌드 때 icon.ico)
     register_fonts()  # 테마(qss)가 Pretendard를 쓰므로 먼저
     app.setFont(QFont(family(), 10))  # qss가 닿지 않는 직접 그리는 글씨(타임라인 등)도 같은 글꼴로
     app.setStyleSheet(THEME_PATH.read_text(encoding="utf-8"))

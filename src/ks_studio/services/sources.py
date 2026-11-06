@@ -18,12 +18,15 @@ import av
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from ks_studio.services.foreground import yield_to_playback
+
 log = logging.getLogger(__name__)
 
 AUDIO_RATE = 48000
 PEAK_WINDOW = AUDIO_RATE // 100  # 파형: 10ms마다 최대 진폭 하나
 THUMB_SIZE = (128, 72)
 OPTIMIZED_DIR = "optimized"
+OPTIMIZED_TAG = "_h265"  # 사본 형식이 바뀌면 이 표시를 바꾼다 → 예전 사본은 쓰지 않는 파일이 되어 정리되고 새로 만들어진다
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,7 @@ def compute_thumbnails(path: Path) -> Thumbnails:
         stream = container.streams.video[0]
         stream.codec_context.skip_frame = "NONKEY"
         for frame in container.decode(stream):
+            yield_to_playback()  # 재생 중이면 잠깐 멈춘다 (영상 전체를 풀어서 무겁다)
             times.append(float(frame.pts * stream.time_base))
             images.append(fit_rgb(frame, *THUMB_SIZE))
     if not images:
@@ -137,7 +141,7 @@ def cache_name(path: Path) -> str:
 
 def optimized_path(cache_dir: Path, path: Path) -> Path:
     """원본 path의 편집용 사본 위치 (프로젝트 cache/optimized/)."""
-    return cache_dir / OPTIMIZED_DIR / f"{cache_name(path)}.mp4"
+    return cache_dir / OPTIMIZED_DIR / f"{cache_name(path)}{OPTIMIZED_TAG}.mp4"
 
 
 class SourceCache(QObject):

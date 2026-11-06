@@ -16,6 +16,7 @@ import numpy as np
 from ks_studio.app.paths import MODELS_DIR
 from ks_studio.core.beauty import frontal_weight, size_weight
 from ks_studio.core.people import cluster, match
+from ks_studio.services.foreground import yield_to_playback
 
 log = logging.getLogger(__name__)
 
@@ -310,6 +311,7 @@ def analyze_video(
     for i, (_index, decoded) in enumerate(frames_from(path, start)):
         if count is not None and i >= count:
             break
+        yield_to_playback()  # 재생 중이면 잠깐 멈춘다
         face = choose(detector.faces(decoded.to_ndarray(format="rgb24")), target)
         rows.append(face.landmarks if face is not None else np.full((LANDMARKS, 2), np.nan))
         if on_progress and total and i % 15 == 0:

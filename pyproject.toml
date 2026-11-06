@@ -32,7 +32,7 @@ version = {attr = "ks_studio.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-ks_studio = ["ui/theme/*.qss", "assets/fonts/*"]
+ks_studio = ["ui/theme/*.qss", "assets/fonts/*", "assets/icon.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]  # backup/ 같은 사본 폴더의 테스트를 모으지 않게

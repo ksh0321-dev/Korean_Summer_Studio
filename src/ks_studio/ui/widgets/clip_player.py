@@ -11,6 +11,8 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
 
+from ks_studio.services.foreground import set_playing
+
 
 def _clock(ms: int) -> str:
     seconds = max(0, ms) // 1000
@@ -67,4 +69,6 @@ class ClipPlayer(QWidget):
         self.time.setText(f"{_clock(ms)} / {_clock(self.player.duration())}")
 
     def _on_state(self, state) -> None:
-        self.play_button.setText("⏸" if state == QMediaPlayer.PlaybackState.PlayingState else "▶")
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.play_button.setText("⏸" if playing else "▶")
+        set_playing(f"clip-{id(self)}", playing)  # 재생하는 동안 백그라운드 작업을 쉬게

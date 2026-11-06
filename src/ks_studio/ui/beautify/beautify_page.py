@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QTabWidget,
@@ -54,7 +55,6 @@ from ks_studio.ui.widgets.status_bar import ERROR, INFO
 
 SAMPLE_SIZE = 200  # 샘플 컷 한 칸(원본·적용 범위·적용 후 중 하나) 크기
 PERSON_ICON = 96  # 보정할 사람 얼굴 썸네일
-PREVIEW_WIDTH = 960  # 미리보기 한 쪽 최대 가로
 SAVE_DELAY_MS = 500
 LEFT_MIN_WIDTH = 400  # 효과 이름 + 슬라이더 + 숫자 칸이 들어갈 폭 (단계 공통 기본 280은 슬라이더가 너무 짧았다)
 VIEW_MESSAGE, VIEW_SAMPLES, VIEW_PREVIEW, VIEW_CLIP = range(4)
@@ -79,34 +79,6 @@ def _pixmap(rgb: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy())
 
 
-def _side_by_side(before: np.ndarray, after: np.ndarray, gap: int = 6) -> np.ndarray:
-    h = max(before.shape[0], after.shape[0])
-    out = np.full((h, before.shape[1] + gap + after.shape[1], 3), 24, np.uint8)
-    out[: before.shape[0], : before.shape[1]] = before
-    out[: after.shape[0], before.shape[1] + gap :] = after
-    return out
-
-
-def _resize(rgb: np.ndarray, width: int) -> np.ndarray:
-    import cv2
-
-    scale = width / rgb.shape[1]
-    return cv2.resize(rgb, (width, max(2, round(rgb.shape[0] * scale))), interpolation=cv2.INTER_AREA)
-
-
-def _face_crop(rgb: np.ndarray, landmarks: np.ndarray, size: int) -> np.ndarray:
-    """얼굴 주변 정사각형만 잘라 size×size로 (샘플 컷에서 보정이 잘 보이게)."""
-    import cv2
-
-    x0, y0 = landmarks.min(axis=0)
-    x1, y1 = landmarks.max(axis=0)
-    cx, cy, half = (x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, y1 - y0) * 0.8
-    h, w = rgb.shape[:2]
-    left, top = int(max(0, cx - half)), int(max(0, cy - half))
-    right, bottom = int(min(w, cx + half)), int(min(h, cy + half))
-    return cv2.resize(rgb[top:bottom, left:right], (size, size), interpolation=cv2.INTER_AREA)
-
-
 class BeautifyPage(QWidget):
     message = Signal(str, str)  # 상태 표시줄 알림
     indicator = Signal(str, str, str)
@@ -124,6 +96,7 @@ class BeautifyPage(QWidget):
         self._preview: tuple | None = None  # (프레임, 원래 RGB, 랜드마크)
         self._unavailable = ai_unavailable_reason()
         self.worker = None
+        self.renderer = None
         if self._unavailable is None:
             from ks_studio.services.beautify import AiWorker  # AI 패키지가 있을 때만 (cv2·insightface)
 
@@ -133,7 +106,12 @@ class BeautifyPage(QWidget):
             self.worker.progress.connect(self._on_progress)
             self.worker.rendered.connect(self._on_rendered)
             self.worker.clip_ready.connect(self._on_clip)
+            from ks_studio.ui.widgets.latest_worker import LatestWorker
+
+            self.renderer = LatestWorker("ai-preview", self)  # 샘플 컷·장면 미리보기 그림은 작업 스레드에서 (UI가 멈추지 않게)
+            self.renderer.ready.connect(self._on_drawn)
             self.worker.failed.connect(self._on_failed)
+        self._sample_token = self._preview_token = -1
         optimizer.finished.connect(lambda path, _out: self._on_optimized(path))
         optimizer.progress.connect(self._on_optimize_progress)
 
@@ -245,6 +223,9 @@ class BeautifyPage(QWidget):
         preview_layout.addWidget(QLabel("미리보기 — 왼쪽 보정 전 · 오른쪽 보정 후"))
         self.preview_label = QLabel()
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 그림 크기가 칸 크기를 정하지 않게 (세로 영상이 창을 아래로 늘렸다) — 칸에 맞춰 그림을 줄인다
+        self.preview_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.preview_label.setMinimumSize(200, 120)
         preview_layout.addWidget(self.preview_label, 1)
         scrub = QHBoxLayout()
         self.scrub = QSlider(Qt.Orientation.Horizontal)
@@ -453,7 +434,9 @@ class BeautifyPage(QWidget):
         self.people_list.clear()
         for person in self._people:
             probe = self._probes[person.probe]
-            item = QListWidgetItem(QIcon(_pixmap(_face_crop(probe.rgb, person.face.landmarks, PERSON_ICON))), f"{person.appearances}장면")
+            from ks_studio.ui.beautify.preview_render import face_crop
+
+            item = QListWidgetItem(QIcon(_pixmap(face_crop(probe.rgb, person.face.landmarks, PERSON_ICON))), f"{person.appearances}장면")
             self.people_list.addItem(item)
         target = self._settings().target_vector
         index = match([p.embedding for p in self._people], target) if target is not None else None
@@ -569,24 +552,33 @@ class BeautifyPage(QWidget):
         self._effect_timer.start()
 
     def _redraw(self) -> None:
-        from ks_studio.services.beautify import apply, regions
+        """샘플 컷(또는 장면 미리보기)을 다시 그려 달라고 작업 스레드에 맡긴다. 결과는 _on_drawn."""
+        if self.renderer is None:
+            return
+        from ks_studio.ui.beautify.preview_render import sample_strip
 
         settings = self._settings()
         if self.center.currentIndex() == VIEW_SAMPLES:
-            for label, sample in zip(self.sample_labels, self._samples):
-                crops = [
-                    _face_crop(image, sample.landmarks, SAMPLE_SIZE)
-                    for image in (
-                        sample.rgb,
-                        regions(sample.rgb, sample.landmarks, settings),
-                        apply(sample.rgb, sample.landmarks, settings),
-                    )
-                ]
-                label.setPixmap(_pixmap(_side_by_side(_side_by_side(crops[0], crops[1]), crops[2])))
-            for label in self.sample_labels[len(self._samples) :]:
-                label.clear()
+            samples = list(self._samples)
+            self._sample_token = self.renderer.request(
+                lambda: [sample_strip(s.rgb, s.landmarks, settings, SAMPLE_SIZE) for s in samples]
+            )
         elif self.center.currentIndex() == VIEW_PREVIEW:
             self._show_preview()
+
+    def _on_drawn(self, token: int, result) -> None:
+        if token == self._sample_token:
+            for label, image in zip(self.sample_labels, result):
+                label.setPixmap(_pixmap(image))
+            for label in self.sample_labels[len(result) :]:
+                label.clear()
+        elif token == self._preview_token:
+            self.preview_label.setPixmap(_pixmap(result))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.center.currentIndex() == VIEW_PREVIEW:
+            self._effect_timer.start()  # 창 크기에 맞춰 미리보기를 다시 (잠깐 모아서)
 
     def _approve(self) -> None:
         self._set_settings(approved=True)
@@ -641,21 +633,15 @@ class BeautifyPage(QWidget):
             self._show_preview()
 
     def _show_preview(self) -> None:
-        import cv2
-
-        from ks_studio.services.beautify import apply
-
-        if self._preview is None:
+        """장면 미리보기: 지금 칸 크기(가로·세로)에 들어가게 줄여서, 작업 스레드에서 보정해 그린다."""
+        if self._preview is None or self.renderer is None:
             return
+        from ks_studio.ui.beautify.preview_render import preview_pair
+
         _, rgb, landmarks = self._preview
-        after = apply(rgb, landmarks, self._settings())
-        if self.landmarks_check.isChecked() and landmarks is not None:
-            after = after.copy()
-            radius = max(2, rgb.shape[1] // 400)
-            for x, y in landmarks.astype(int):
-                cv2.circle(after, (int(x), int(y)), radius, (0, 255, 0), -1)
-        width = min(PREVIEW_WIDTH, max(200, (self.preview_label.width() - 6) // 2))
-        self.preview_label.setPixmap(_pixmap(_side_by_side(_resize(rgb, width), _resize(after, width))))
+        settings, points = self._settings(), self.landmarks_check.isChecked()
+        box = (self.preview_label.width(), self.preview_label.height())
+        self._preview_token = self.renderer.request(lambda: preview_pair(rgb, landmarks, settings, box, points))
         self.status.setText("이 장면에는 보정할 사람이 없습니다 (그대로 둡니다)" if landmarks is None else "")
 
     # ── 보정본 만들기 ────────────────────────────────────────────

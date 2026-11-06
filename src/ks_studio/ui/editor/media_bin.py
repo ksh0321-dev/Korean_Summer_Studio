@@ -2,10 +2,13 @@
 
 더블클릭 = 재생 헤드 위치에 넣기 · 타임라인으로 끌기 = 원하는 위치에 넣기
 "+ 가져오기" 또는 탐색기에서 끌어다 놓기 = 미디어 추가 (복사/참조는 ⚙ 설정)
+우클릭 = 파일 위치 열기(탐색기) · 워크스페이스에서 빼기
 "🗑 빼기" = 목록에서 빼고 그 영상으로 만든 사본·캐시를 지운다 (원본 파일은 그대로 — 확인은 컷편집 페이지가 묻는다)
 휴대폰 영상처럼 편집용 사본이 필요한 미디어는 상태를 한 줄 더 보여 주고, 사본이 준비될 때까지 넣을 수 없다.
 """
 
+import os
+import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,6 +31,14 @@ from ks_studio.services.sources import SourceCache
 from ks_studio.ui.editor.timeline import MIME_MEDIA, format_frames
 
 VIDEO_FILTER = "영상 (*.mp4 *.mov *.mkv *.m4v *.avi *.webm)"
+
+
+def show_in_explorer(path: Path) -> None:
+    """탐색기로 그 파일이 있는 폴더를 열고 파일을 골라 둔다 (파일이 없으면 폴더만)."""
+    if path.exists():
+        subprocess.Popen(["explorer", "/select,", str(path.resolve())])
+    elif path.parent.exists():
+        os.startfile(path.parent)
 
 
 @dataclass(frozen=True)
@@ -168,6 +179,8 @@ class MediaBin(QWidget):
         if item.copying:
             return
         menu = QMenu(self)
+        menu.addAction("📂 파일 위치 열기", lambda: show_in_explorer(item.path))
+        menu.addSeparator()
         menu.addAction("🗑 워크스페이스에서 빼기 (원본은 그대로)", lambda: self.remove_requested.emit(str(item.path)))
         menu.exec(self.list.mapToGlobal(pos))
 

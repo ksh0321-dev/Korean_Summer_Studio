@@ -30,6 +30,7 @@ import av
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from ks_studio.services.foreground import yield_to_playback
 from ks_studio.services.sources import AUDIO_RATE
 
 log = logging.getLogger(__name__)
@@ -39,14 +40,17 @@ FILTER_THREADS = 4  # 실측: 1 → 15.9ms, 4 → 8.6ms, 8 → 9.9ms (디코딩�
 VFR_SAMPLE_PACKETS = 400
 VFR_TOLERANCE = 0.25  # 공칭 프레임 간격에서 이만큼(비율) 넘게 벗어난 간격을 '불규칙'으로 센다
 VFR_IRREGULAR_RATIO = 0.01
-# 화질 우선 (내보내기도 사본을 읽는다). NVIDIA GPU가 없거나 NVENC가 못 여는 크기면 CPU(libx264)로
-# 비트레이트 목표(b)와 상한(maxrate)을 풀지 않으면 NVENC가 기본값에 묶여 cq를 낮춰도 화질이 그대로였다
-# (실측: cq 18·14·10 모두 PSNR 42.7~42.9dB). 풀면 cq 16 48.2 · 14 49.8 · 12 51.4dB (원본 대비 크기 0.9·1.0·1.3배).
-# 편집용 사본·AI 보정본은 중간 파일이라 화질 우선 → 51dB = 눈으로 구분 불가
+# 편집용 사본·AI 보정본: 원본 크기 수준의 H.265 (NVIDIA GPU가 없거나 NVENC가 못 여는 크기면 CPU libx264).
+# 예전엔 H.264 거의 무손실(cq 12, B프레임 없음)이었는데 4K 60fps 휴대폰 영상이 원본의 6배(48 → 294Mbps)가 되어
+# 편집 미리보기가 버벅였다. 실측 (IMG_8737 4K60 10초, 무손실 변환 대비):
+#   H.264 cq12 6.0배 48.1dB · H.265 cq20 1.7배 44.6dB · H.265 cq22 B3 1.24배 43.8dB (디코딩 159fps)
+# 인스타그램이 다시 강하게 압축하므로 중간 파일은 원본 크기 수준이면 충분하다.
+# b=0·maxrate를 풀지 않으면 NVENC가 평균 비트레이트 기본값에 묶여 cq가 먹지 않는다 (실측).
 ENCODERS = (
-    ("h264_nvenc", {"preset": "p5", "rc": "vbr", "cq": "12", "b": "0", "maxrate": "400M", "bufsize": "800M", "bf": "0"}),
-    ("libx264", {"preset": "veryfast", "crf": "12", "bf": "0"}),
+    ("hevc_nvenc", {"preset": "p5", "rc": "vbr", "cq": "22", "b": "0", "maxrate": "200M", "bufsize": "400M", "bf": "3"}),
+    ("libx264", {"preset": "veryfast", "crf": "20"}),  # CPU: H.265(libx265)는 4K에서 너무 느리다
 )
+KEYFRAME_SECONDS = 1.0  # 키프레임 간격 (편집 미리보기에서 찾아가기 · 크기 사이 절충)
 AUDIO_BITRATE = 256_000
 
 # FFmpeg 색 번호 → colorspace 필터 이름 (모르는 값·미지정은 BT.709로 본다)
@@ -168,13 +172,7 @@ def _transcode(path, tmp, plan: Plan, on_progress, process=None, encoders=ENCODE
     stop = threading.Event()
     reader = threading.Thread(target=_decode, args=(path, frames, stop), daemon=True, name="optimize-decode")
     with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as dst:
-        name, options = video_encoder(plan.size, plan.fps, encoders)
-        v_out = dst.add_stream(name, rate=plan.fps, options={**options, "g": str(max(1, plan.fps // 2))})
-        if "hevc" in name or "265" in name:
-            v_out.codec_context.codec_tag = "hvc1"  # 아이폰·맥이 MP4 H.265를 틀려면 이 표시여야 한다
-        v_out.width, v_out.height = plan.size
-        v_out.pix_fmt = "yuv420p"
-        v_out.time_base = Fraction(1, plan.fps)
+        v_out = add_video_stream(dst, plan.size, plan.fps, encoders)
         audio = _AudioCopy(dst, channels) if channels else None
         graph = None
         origin = None  # 영상 첫 프레임 시각 (초). 사본에서는 이 순간이 0초
@@ -185,6 +183,7 @@ def _transcode(path, tmp, plan: Plan, on_progress, process=None, encoders=ENCODE
                     raise item
                 if cancel is not None and cancel.is_set():
                     raise Cancelled()
+                yield_to_playback()  # 재생 중이면 잠깐 멈춘다 (편집용 사본·보정본·내보내기가 재생을 끊지 않게)
                 kind, frame = item
                 if kind == "audio":
                     if audio is not None:
@@ -245,6 +244,22 @@ def _graph(first: av.VideoFrame, time_base, plan: Plan) -> av.filter.Graph:
     nodes.append(graph.add("buffersink"))
     graph.link_nodes(*nodes).configure()
     return graph
+
+
+def add_video_stream(dst, size: tuple[int, int], rate, encoders: tuple = ENCODERS):
+    """dst에 영상 스트림을 연다: 되는 인코더(GPU → CPU) · 키프레임 간격 · 크기 · yuv420p · time_base 1/fps.
+
+    편집용 사본·AI 보정본·미리보기 영상·내보내기가 모두 이 길로 연다 (설정이 한 곳에서 바뀌게).
+    """
+    fps = float(rate)
+    name, options = video_encoder(size, fps, encoders)
+    stream = dst.add_stream(name, rate=rate, options={"g": str(max(1, round(fps * KEYFRAME_SECONDS))), **options})
+    if "hevc" in name or "265" in name:
+        stream.codec_context.codec_tag = "hvc1"  # 아이폰·맥이 MP4 H.265를 틀려면 이 표시여야 한다
+    stream.width, stream.height = size
+    stream.pix_fmt = "yuv420p"
+    stream.time_base = 1 / Fraction(rate)
+    return stream
 
 
 def video_encoder(size: tuple[int, int], fps: float, encoders: tuple = ENCODERS) -> tuple[str, dict[str, str]]:

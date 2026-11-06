@@ -17,6 +17,7 @@ from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 
 from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
+from ks_studio.services.foreground import set_playing
 from ks_studio.services.render import TimelineRenderer, canvas_size, fit_size
 from ks_studio.services.sources import AUDIO_RATE, SourceCache
 
@@ -97,6 +98,7 @@ class Player(QObject):
         self._sink.setBufferSize(int(AUDIO_RATE * AUDIO_BUFFER_S) * BYTES_PER_SAMPLE)
         self._io = self._sink.start()
         self._timer.start()
+        set_playing("editor", True)  # 썸네일·편집용 사본·AI 작업은 재생이 멈출 때까지 쉰다
         self.playing_changed.emit(True)
 
     def pause(self) -> None:
@@ -108,6 +110,7 @@ class Player(QObject):
         self._sink.deleteLater()
         self._sink = self._io = None
         self._drain()
+        set_playing("editor", False)
         self.playing_changed.emit(False)
 
     def seek(self, frame: int) -> None:

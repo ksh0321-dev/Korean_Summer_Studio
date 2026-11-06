@@ -59,7 +59,8 @@ from ks_studio.services.face import (
     scan,
     track_file,
 )
-from ks_studio.services.optimize import make_optimized, video_encoder
+from ks_studio.services.foreground import yield_to_playback
+from ks_studio.services.optimize import add_video_stream, make_optimized
 from ks_studio.services.yuv import from_planes, planes
 from ks_studio.services.sources import AUDIO_RATE, cache_name
 
@@ -592,12 +593,8 @@ def render_beautified(path: Path, output: Path, track: np.ndarray, settings: Bea
             a_in = src.streams.audio[0] if src.streams.audio else None
             fps = float(v_in.average_rate)
             size = (v_in.codec_context.width, v_in.codec_context.height)
-            name, options = video_encoder(size, fps)
-            v_out = dst.add_stream(name, rate=v_in.average_rate, options={**options, "g": str(max(1, round(fps / 2)))})
-            v_out.width, v_out.height = size
-            v_out.pix_fmt = "yuv420p"
+            v_out = add_video_stream(dst, size, v_in.average_rate)
             frame_tb = 1 / Fraction(v_in.average_rate)
-            v_out.time_base = frame_tb
             a_out = dst.add_stream_from_template(a_in) if a_in is not None else None
             total = len(track)
             index = 0
@@ -608,6 +605,7 @@ def render_beautified(path: Path, output: Path, track: np.ndarray, settings: Bea
                         dst.mux(packet)
                     continue
                 for decoded in packet.decode():  # 영상은 끝 표시 패킷도 디코딩해야 남은 프레임이 나온다
+                    yield_to_playback()  # 재생 중이면 잠깐 멈춘다
                     landmarks = track[index] if index < total else None
                     frame = apply_frame(decoded, landmarks, settings)
                     # v_out.time_base는 첫 mux 때 컨테이너가 1/15360 같은 값으로 바꾼다 → 고정된 1/fps를 써야 한다
@@ -652,17 +650,14 @@ def render_side_by_side(
         size = (2 * half_w + CLIP_GAP, half_h)
         frame_tb = 1 / Fraction(rate)
         with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as dst:
-            name, options = video_encoder(size, float(rate))
-            v_out = dst.add_stream(name, rate=rate, options={**options, "g": str(max(1, round(float(rate) / 2)))})
-            v_out.width, v_out.height = size
-            v_out.pix_fmt = "yuv420p"
-            v_out.time_base = frame_tb
+            v_out = add_video_stream(dst, size, rate)
             a_out = dst.add_stream("aac", rate=AUDIO_RATE, layout="stereo") if has_audio else None
             canvas = np.zeros((half_h, size[0], 3), np.uint8)
             done = 0
             for _index, frame in frames_from(path, start):
                 if done >= count:
                     break
+                yield_to_playback()
                 after = apply_frame(frame, landmarks(done), settings)
                 canvas[:, :half_w] = frame.reformat(half_w, half_h, format="rgb24").to_ndarray()
                 canvas[:, half_w + CLIP_GAP :] = after.reformat(half_w, half_h, format="rgb24").to_ndarray()

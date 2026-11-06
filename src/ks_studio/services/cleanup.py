@@ -95,7 +95,7 @@ def sweep(workspace: Workspace, live: Iterable[Path], keep: Iterable[Path] = ())
     keep = {Path(p).resolve() for p in keep}
     live = [p for p in live if p.exists()]
     keys = set().union(*(_keys(cache, p) for p in live)) if live else set()
-    originals = {cache_name(p) for p in live}
+    copies = {optimized_path(cache, p).name for p in live}
     doomed: list[Path] = [workspace.root / "project.tmp"]  # 프로젝트 폴더 바로 아래는 우리가 만든 것만 (사용자 파일이 있을 수 있다)
     for folder in (cache, cache / OPTIMIZED_DIR, *(cache / s for s in SUBDIRS), workspace.ai_dir,
                    workspace.exports_dir, workspace.final_dir, workspace.subtitles_file.parent):
@@ -115,7 +115,7 @@ def sweep(workspace: Workspace, live: Iterable[Path], keep: Iterable[Path] = ())
                 doomed.append(f)  # 쓰지 않는 영상의 캐시, 또는 예전 형식(thumbs.npz 등)
         optimized = cache / OPTIMIZED_DIR
         if optimized.exists():
-            doomed += [f for f in optimized.glob("*.mp4") if f.stem not in originals]
+            doomed += [f for f in optimized.glob("*.mp4") if f.name not in copies]  # 예전 형식 사본도 여기서
         for sub in SUBDIRS:
             folder = cache / sub
             if folder.exists():
