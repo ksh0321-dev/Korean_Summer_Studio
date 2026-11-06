@@ -53,7 +53,7 @@ FOREHEAD_LIFT = 0.25  # 피부 영역을 눈썹 위로 눈 사이 거리의 25%�
 CHEEKBONE_MAX, CHEEKBONE_RADIUS = 0.05, 0.3
 CHIN_MAX, CHIN_RADIUS = 0.08, 0.35  # 강도 ±100%일 때 턱 끝이 눈 사이 거리의 8%만큼 아래(+)/위(-)로
 NOSE_LENGTH_MAX = 0.12  # 강도 100%일 때 코 아래쪽이 (두 눈 가운데~코 아래) 거리의 12%만큼 올라간다
-FACE_SMALL_MAX = 0.08  # 강도 100%일 때 얼굴이 8% 작아진다 (틈을 메우는 폭도 그만큼이라 너무 키우면 메운 티가 난다)
+FACE_SMALL_MAX = 0.08  # 강도 100%일 때 머리(얼굴+머리카락)가 8% 작아진다 (드러난 배경을 메우는 폭도 그만큼이라 너무 키우면 메운 티가 난다)
 EYE_ZOOM_MAX, EYE_ZOOM_RADIUS = 0.15, 1.0  # 강도 100%일 때 눈 가운데가 1/(1-0.15)≈1.18배 · 범위 = 눈 가로 길이 × 1.0
 UNDER_EYE = (0.45, 0.55, 0.22)  # 다크서클 타원: 눈 가운데에서 아래로 눈 가로 × 0.45, 반지름 가로 0.55 · 세로 0.22
 NOSE_BOTTOM = (76, 77, 78, 79, 80, 85, 84, 83, 82, 86)  # 코 옆 아래~콧볼·콧구멍 (잡티 제거에서 뺀다 — 콧구멍·콧볼 그늘도 '어두운 점')
@@ -75,6 +75,7 @@ EFFECTS = (  # BeautySettings의 효과 세기 칸 (chin만 -1~1, 나머지 0~1)
     "smooth", "blemish", "brighten", "dark_circle",
     "slim", "cheekbone", "chin", "eyes", "nose_slim", "nose_length", "smile", "face_small",
     "blush", "contour", "eyeshadow", "lip", "teeth", "eye_clear",
+    "waist", "shoulders", "legs",
 )
 PRESET_FIELDS = (*EFFECTS, "eyeshadow_color")  # 프리셋에 담는 칸 (효과 세기 + 색)
 
@@ -100,6 +101,9 @@ class BeautySettings:
     lip: float = 0.0  # 립 컬러
     teeth: float = 0.0  # 치아 미백
     eye_clear: float = 0.0  # 눈 또렷하게
+    waist: float = 0.0  # 허리 잘록 (몸매 — 몸의 점·사람 분리 모델)
+    shoulders: float = 0.0  # 어깨 좁게
+    legs: float = 0.0  # 다리 길게
     approved: bool = False  # 샘플 컷을 보고 OK했는지 — 그 뒤에야 미리보기와 보정본 만들기를 한다
     target: tuple[float, ...] | None = None  # 보정할 사람의 얼굴 인식값 (없으면 가장 큰 얼굴)
 

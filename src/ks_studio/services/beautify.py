@@ -35,7 +35,6 @@ from ks_studio.core.beauty import (
     eye_distance,
     eye_polygons,
     eye_zooms,
-    face_small_scale,
     eyelid_polygons,
     frontal_weight,
     lip_polygons,
@@ -61,7 +60,9 @@ from ks_studio.services.face import (
     scan,
     track_file,
 )
+from ks_studio.services.body import body_models_ready
 from ks_studio.services.foreground import yield_to_playback
+from ks_studio.services.reshape import BODY_EFFECTS, BodyFrames, BodyInfo, needs_body, overlay, reshape
 from ks_studio.services.optimize import add_video_stream, make_optimized
 from ks_studio.services.yuv import from_planes, planes
 from ks_studio.services.sources import AUDIO_RATE, cache_name
@@ -87,8 +88,28 @@ HIGHLIGHT_MAX = 0.16
 EYESHADOW_MAX = 0.55  # 아이섀도 100%: 눈두덩 색(a·b)을 55%, 밝기를 그 절반만큼 색 쪽으로
 
 
-def apply(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySettings, frame_width: int | None = None) -> np.ndarray:
-    """보정한 새 RGB 배열. 얼굴이 없거나 효과가 다 0이면 원본 그대로 (복사 없이).
+def apply(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySettings, frame_width: int | None = None,
+          body: BodyInfo | None = None) -> np.ndarray:
+    """보정한 새 RGB 배열 (바뀐 게 없으면 원본 그대로, 복사 없이).
+
+    body(사람 분리 + 몸의 점, services.reshape)가 있으면 몸매·얼굴 작게도 — 사람 층만 옮기고 배경은 그대로.
+    이때 rgb는 화면 전체여야 한다 (body의 좌표가 화면 기준). 얼굴형·색 보정을 먼저 하고 사람 층 변형은 마지막에.
+    """
+    out = _apply_face(rgb, landmarks, settings, frame_width)
+    if body is None or not needs_body(settings):
+        return out
+    has_face = landmarks is not None and not np.isnan(landmarks).any()
+    strengths = {name: getattr(settings, name) for name in BODY_EFFECTS}
+    if has_face:  # 얼굴 작게도 옆얼굴·작은 얼굴은 줄인다 (다른 얼굴 효과와 같게)
+        strengths["face_small"] = settings.face_small * frontal_weight(landmarks) * size_weight(landmarks, frame_width or rgb.shape[1])
+    changed = out.copy() if out is rgb else out
+    if reshape(changed, landmarks if has_face else None, strengths, body):
+        return changed
+    return out
+
+
+def _apply_face(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySettings, frame_width: int | None = None) -> np.ndarray:
+    """얼굴 보정 (피부·메이크업·얼굴형). 얼굴이 없거나 효과가 다 0이면 원본 그대로 (복사 없이).
 
     옆얼굴·작은 얼굴은 효과를 줄인다 (정면·크기 가중치). rgb가 화면 일부(얼굴 주변)면 frame_width에 전체 폭을 준다.
     색(피부·메이크업)을 먼저 입히고 변형(얼굴형)은 마지막에: 색 영역이 랜드마크와 딱 맞고, 변형이 색칠한 피부를 같이 옮긴다.
@@ -127,8 +148,6 @@ def apply(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySetting
     _warp(face, smile_pulls(lm, k["smile"]))
     for zoom in eye_zooms(lm, k["eyes"]):
         _zoom(face, zoom)
-    if k["face_small"] > 0:  # 마지막에: 눈 키우기 등은 원래 자리에서 하고 얼굴째 줄인다
-        _shrink_face(face, lm, k["face_small"])
     return out
 
 
@@ -145,19 +164,22 @@ def face_box(landmarks: np.ndarray, width: int, height: int) -> tuple[int, int, 
     return x0, y0, x1, y1
 
 
-def apply_frame(frame: av.VideoFrame, landmarks: np.ndarray | None, settings: BeautySettings) -> av.VideoFrame:
+def apply_frame(frame: av.VideoFrame, landmarks: np.ndarray | None, settings: BeautySettings,
+                body: BodyInfo | None = None) -> av.VideoFrame:
     """영상 프레임(YUV)에 보정을 입힌다. 얼굴 주변만 RGB로 바꿔 효과를 넣고, 효과가 바꾼 화소만 YUV로 되돌려 쓴다.
 
     화면 전체를 RGB로 바꿨다 되돌리면 효과가 없어도 PSNR 47dB까지 떨어졌다 (실측) — 효과가 닿지 않은 화소는
-    얼굴 주변이라도 원래 YUV 값 그대로 둔다.
+    얼굴 주변이라도 원래 YUV 값 그대로 둔다. 몸매·얼굴 작게(body)는 몸 전체에 닿아서 화면 전체를 바꾼다 (바뀐 화소만 쓰는 건 같다).
     """
     if frame.format.name != "yuv420p":
         frame = frame.reformat(format="yuv420p")
-    if landmarks is None or settings.is_identity or np.isnan(landmarks).any():
+    whole = body is not None and needs_body(settings)
+    no_face = landmarks is None or np.isnan(landmarks).any()
+    if settings.is_identity or (no_face and not whole):
         return frame
     w, h = frame.width, frame.height
     y_plane, u_plane, v_plane = planes(frame)  # 판을 따로 (높이 절반이 홀수여도 — services.yuv)
-    x0, y0, x1, y1 = face_box(landmarks, w, h)
+    x0, y0, x1, y1 = (0, 0, w // 2 * 2, h // 2 * 2) if whole else face_box(landmarks, w, h)
     if x1 - x0 < 4 or y1 - y0 < 4:
         return frame
     cx0, cy0, cx1, cy1 = x0 // 2, y0 // 2, x1 // 2, y1 // 2
@@ -165,16 +187,19 @@ def apply_frame(frame: av.VideoFrame, landmarks: np.ndarray | None, settings: Be
         [y_plane[y0:y1, x0:x1].ravel(), u_plane[cy0:cy1, cx0:cx1].ravel(), v_plane[cy0:cy1, cx0:cx1].ravel()]
     ).reshape((y1 - y0) * 3 // 2, x1 - x0)
     rgb = cv2.cvtColor(roi, cv2.COLOR_YUV2RGB_I420)
-    after = apply(rgb, landmarks - (x0, y0), settings, frame_width=w)
+    after = apply(rgb, None if landmarks is None else landmarks - (x0, y0), settings, frame_width=w, body=body)
     if after is rgb:
         return frame
     back = cv2.cvtColor(after, cv2.COLOR_RGB2YUV_I420).ravel()  # 같은 변환의 역이라 바뀐 곳과 안 바뀐 곳 경계가 티 나지 않는다
     n_y, n_c = (y1 - y0) * (x1 - x0), (cy1 - cy0) * (cx1 - cx0)
-    changed = (after != rgb).any(axis=2)
-    changed_c = changed.reshape(cy1 - cy0, 2, cx1 - cx0, 2).any(axis=(1, 3))  # 색 정보는 2×2 화소마다 하나
-    y_plane[y0:y1, x0:x1][changed] = back[:n_y].reshape(y1 - y0, x1 - x0)[changed]
-    u_plane[cy0:cy1, cx0:cx1][changed_c] = back[n_y : n_y + n_c].reshape(cy1 - cy0, cx1 - cx0)[changed_c]
-    v_plane[cy0:cy1, cx0:cx1][changed_c] = back[n_y + n_c :].reshape(cy1 - cy0, cx1 - cx0)[changed_c]
+    # 바뀐 화소: 세 색의 차이를 더해 (포화) 0이 아닌 곳. numpy .any(axis=2)·불리언 인덱싱은 4K 화면 전체에서 프레임당 0.1초 넘게 걸렸다
+    # (×255로 포화시켜 바뀐 곳은 늘 255 — 2×2 평균으로 줄여도 0이 되지 않게)
+    changed = cv2.transform(cv2.absdiff(after, rgb), np.full((1, 3), 255, np.float32))
+    changed_c = cv2.resize(changed, (cx1 - cx0, cy1 - cy0), interpolation=cv2.INTER_AREA) > 0  # 색 정보는 2×2 화소마다 하나
+    changed = changed > 0
+    np.copyto(y_plane[y0:y1, x0:x1], back[:n_y].reshape(y1 - y0, x1 - x0), where=changed)
+    np.copyto(u_plane[cy0:cy1, cx0:cx1], back[n_y : n_y + n_c].reshape(cy1 - cy0, cx1 - cx0), where=changed_c)
+    np.copyto(v_plane[cy0:cy1, cx0:cx1], back[n_y + n_c :].reshape(cy1 - cy0, cx1 - cx0), where=changed_c)
     return from_planes(y_plane, u_plane, v_plane, frame)
 
 
@@ -201,12 +226,16 @@ REGION_COLORS = {  # RGB
 REGION_ALPHA = 0.4
 
 
-def regions(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySettings) -> np.ndarray:
+def regions(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySettings, body: BodyInfo | None = None) -> np.ndarray:
     """켠 효과가 들어갈 자리를 원본 위에 반투명하게 칠한 그림 (효과마다 색), 변형은 움직임 화살표도.
 
     효과마다 영역을 한 번에 칠하고 한 번만 섞는다 (원이 겹쳐도 진해지지 않게). 끈 효과는 그리지 않는다 (13가지라 다 그리면 어지럽다).
+    몸매 효과를 켰고 body가 있으면 사람 층과 몸의 점을 먼저 그린다.
     """
-    out = rgb.copy()
+    if body is not None and any(getattr(settings, name) > 0 for name in BODY_EFFECTS):
+        out = overlay(rgb, body)
+    else:
+        out = rgb.copy()
     if landmarks is None or np.isnan(landmarks).any():
         return out
     x0, y0, x1, y1 = face_box(landmarks, rgb.shape[1], rgb.shape[0])
@@ -575,36 +604,6 @@ def _eyeshadow(face: np.ndarray, lm: np.ndarray, strength: float, color: str) ->
     _in_lab(face, _eyelid_mask(face.shape, lm), tint)
 
 
-FACE_SMALL_FILL_SCALE = 0.25  # 틈 메우기(inpaint)는 1/4 크기에서 (메울 곳은 흐린 띠라 충분하고 빠르다)
-FACE_SMALL_FEATHER = 0.05  # 줄인 얼굴 가장자리를 눈 사이 거리의 5%만큼 부드럽게 (2%는 경계선이 보였다)
-
-
-def _shrink_face(face: np.ndarray, lm: np.ndarray, strength: float) -> None:
-    """얼굴 영역(윤곽 + 이마 아래쪽)만 가운데로 고르게 줄인다. 제자리에서.
-
-    퍼지는 확대·축소 변형은 얼굴 둘레의 배경까지 휘게 한다 → 얼굴만 떼어 줄이고, 줄어서 생긴 틈(원래 얼굴 가장자리 ~
-    줄인 얼굴 가장자리)은 둘레 화소(배경·머리카락·목)로 메꾼다 (cv2.inpaint). 원래 얼굴 영역 밖은 화소 하나 바꾸지 않는다.
-    """
-    center_x, center_y, scale = face_small_scale(lm, strength)
-    eyes = eye_distance(lm)
-    shape = face.shape
-    old = _fill(shape, [face_outline(lm)])  # 원래 얼굴 영역 (윤곽 + 눈썹)
-    to_small = np.float32([[scale, 0, center_x * (1 - scale)], [0, scale, center_y * (1 - scale)]])
-    small_face = cv2.warpAffine(face, to_small, (shape[1], shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-    new = cv2.warpAffine(old, to_small, (shape[1], shape[0]), flags=cv2.INTER_LINEAR)
-    hole = _grow((old > 0.01).astype(np.float32), 0.01 * eyes) > 0  # 메울 수 있는 곳: 원래 얼굴 + 가장자리 몇 화소
-    # 틈 메우기: 원래 얼굴 자리를 둘레에서 채운 그림 (줄인 얼굴 아래에 깔린다)
-    h, w = shape[:2]
-    small_size = (max(8, round(w * FACE_SMALL_FILL_SCALE)), max(8, round(h * FACE_SMALL_FILL_SCALE)))
-    hole_small = cv2.resize(hole.astype(np.uint8) * 255, small_size, interpolation=cv2.INTER_NEAREST)
-    hole_small = cv2.dilate(hole_small, np.ones((3, 3), np.uint8))
-    filled = cv2.inpaint(cv2.resize(face, small_size, interpolation=cv2.INTER_AREA), hole_small, 3, cv2.INPAINT_TELEA)
-    behind = cv2.resize(filled, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
-    alpha = cv2.GaussianBlur(new, (0, 0), max(0.5, FACE_SMALL_FEATHER * eyes))[..., None]
-    mixed = behind + (small_face.astype(np.float32) - behind) * alpha
-    face[hole] = np.clip(mixed[hole] + 0.5, 0, 255).astype(np.uint8)
-
-
 def _zoom(image: np.ndarray, zoom: Zoom) -> None:
     """(cx, cy) 둘레를 확대: 가운데에서 1/(1-amount)배, 반지름에서 1배 (경계에서 기울기까지 이어져 티가 안 난다)."""
     box = _roi(image, zoom.cx, zoom.cy, zoom.radius)
@@ -617,6 +616,11 @@ def _zoom(image: np.ndarray, zoom: Zoom) -> None:
     factor = 1 - zoom.amount * np.clip(1 - t2, 0, None) ** 2  # 결과 화소는 가운데 쪽 원본에서 가져온다 → 확대
     image[y0:y1, x0:x1] = cv2.remap(image, zoom.cx + dx * factor, zoom.cy + dy * factor, cv2.INTER_LINEAR,
                                     borderMode=cv2.BORDER_REFLECT)
+
+
+def body_frames(settings: BeautySettings) -> BodyFrames | None:
+    """몸매·얼굴 작게를 켰고 몸 모델이 있으면 프레임마다 사람을 분석하는 함수 (없으면 None — 그 효과만 빠진다)."""
+    return BodyFrames() if needs_body(settings) and body_models_ready() else None
 
 
 def render_beautified(path: Path, output: Path, track: np.ndarray, settings: BeautySettings, on_progress=None) -> None:
@@ -635,6 +639,7 @@ def render_beautified(path: Path, output: Path, track: np.ndarray, settings: Bea
             a_out = dst.add_stream_from_template(a_in) if a_in is not None else None
             total = len(track)
             index = 0
+            bodies = body_frames(settings)
             for packet in src.demux(*(s for s in (v_in, a_in) if s is not None)):
                 if packet.stream is a_in:
                     if packet.dts is not None:  # 소리는 그대로 옮긴다 (끝 표시 빈 패킷은 버림)
@@ -644,7 +649,7 @@ def render_beautified(path: Path, output: Path, track: np.ndarray, settings: Bea
                 for decoded in packet.decode():  # 영상은 끝 표시 패킷도 디코딩해야 남은 프레임이 나온다
                     yield_to_playback()  # 재생 중이면 잠깐 멈춘다
                     landmarks = track[index] if index < total else None
-                    frame = apply_frame(decoded, landmarks, settings)
+                    frame = apply_frame(decoded, landmarks, settings, bodies(decoded, landmarks) if bodies else None)
                     # v_out.time_base는 첫 mux 때 컨테이너가 1/15360 같은 값으로 바꾼다 → 고정된 1/fps를 써야 한다
                     frame.pts, frame.time_base = index, frame_tb
                     dst.mux(v_out.encode(frame))
@@ -691,11 +696,13 @@ def render_side_by_side(
             a_out = dst.add_stream("aac", rate=AUDIO_RATE, layout="stereo") if has_audio else None
             canvas = np.zeros((half_h, size[0], 3), np.uint8)
             done = 0
+            bodies = body_frames(settings)
             for _index, frame in frames_from(path, start):
                 if done >= count:
                     break
                 yield_to_playback()
-                after = apply_frame(frame, landmarks(done), settings)
+                lm = landmarks(done)
+                after = apply_frame(frame, lm, settings, bodies(frame, lm) if bodies else None)
                 canvas[:, :half_w] = frame.reformat(half_w, half_h, format="rgb24").to_ndarray()
                 canvas[:, half_w + CLIP_GAP :] = after.reformat(half_w, half_h, format="rgb24").to_ndarray()
                 out = av.VideoFrame.from_ndarray(canvas, format="rgb24").reformat(format="yuv420p")
@@ -831,10 +838,12 @@ class AiWorker(QObject):
 
         if original is not None:  # 원본 → (회전·색 변환 + 보정) → 압축 한 번. 프레임 번호는 사본과 같다 (같은 변환)
             source, plan = original
+            bodies = body_frames(settings)
 
             def beautify(frame: av.VideoFrame) -> av.VideoFrame:
                 index = frame.pts
-                return apply_frame(frame, track[index] if 0 <= index < len(track) else None, settings)
+                landmarks = track[index] if 0 <= index < len(track) else None
+                return apply_frame(frame, landmarks, settings, bodies(frame, landmarks) if bodies else None)
 
             make_optimized(source, output, plan, on_progress, process=beautify)
         else:

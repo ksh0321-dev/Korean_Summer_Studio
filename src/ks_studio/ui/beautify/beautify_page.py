@@ -63,8 +63,9 @@ EFFECT_TABS = (  # (탭, ((BeautySettings 칸, 이름), ...)) — 턱 길이만 
     ("얼굴형", (
         ("slim", "얼굴 갸름"), ("cheekbone", "광대 축소"), ("chin", "턱 길이 (−짧게 · +길게)"),
         ("eyes", "눈 키우기"), ("nose_slim", "콧볼 축소"), ("nose_length", "코 길이 줄이기"), ("smile", "웃는 입"),
-        ("face_small", "얼굴 작게 (실험)"),  # 배경은 그대로지만 얼굴 가장자리에 선이 보일 수 있다 — 분할 모델로 다듬을 예정
+        ("face_small", "얼굴 작게"),  # 사람 분리 모델로 머리째 줄이고 드러난 배경만 메꾼다 (몸 모델 필요)
     )),
+    ("몸매", (("waist", "허리 잘록"), ("shoulders", "어깨 좁게"), ("legs", "다리 길게"))),  # 몸의 점(RTMPose) + 사람 분리
     ("메이크업", (
         ("blush", "블러셔"), ("contour", "윤곽 (쉐딩·하이라이트)"), ("eyeshadow", "아이섀도"),
         ("lip", "립 컬러"), ("teeth", "치아 미백"), ("eye_clear", "눈 또렷하게"),
@@ -166,7 +167,7 @@ class BeautifyPage(QWidget):
         # 얼굴 모델: 없으면 눌러서 내려받는다 (저절로 받지 않는다 — 약 290MB). 있으면 '완료'로 보인다
         self.model_button = QPushButton()
         self.model_button.clicked.connect(self._download_model)
-        self._model_progress.connect(lambda r: self.model_button.setText(f"얼굴 모델 내려받는 중… {int(r * 100)}%"))
+        self._model_progress.connect(lambda r: self.model_button.setText(f"AI 모델 내려받는 중… {int(r * 100)}%"))
         self._model_done.connect(self._on_model_done)
         self._downloading = False
         left_layout.addWidget(self.model_button)
@@ -319,25 +320,34 @@ class BeautifyPage(QWidget):
             self.model_button.setText("AI 보정 패키지 없음")
             self.model_button.setEnabled(False)
             return
+        from ks_studio.services.body import BODY_MODEL_MB, body_models_ready
         from ks_studio.services.face import FACE_MODEL_MB, face_models_ready
 
-        ready = face_models_ready()
-        self.model_button.setText("✓ 모델 다운로드 완료" if ready else f"⬇ 얼굴 모델 내려받기 (약 {FACE_MODEL_MB}MB)")
-        self.model_button.setEnabled(not ready)
-        self.model_button.setToolTip("" if ready else "AI 보정에 쓰는 얼굴 모델을 models 폴더에 내려받습니다 (인터넷 필요, 처음 한 번)")
+        size = (0 if face_models_ready() else FACE_MODEL_MB) + (0 if body_models_ready() else BODY_MODEL_MB)
+        self.model_button.setText("✓ 모델 다운로드 완료" if not size else f"⬇ AI 모델 내려받기 (약 {size}MB)")
+        self.model_button.setEnabled(bool(size))
+        self.model_button.setToolTip("" if not size else "AI 보정에 쓰는 얼굴·몸 모델을 models 폴더에 내려받습니다 "
+                                     "(인터넷 필요, 처음 한 번). 몸 모델은 몸매·얼굴 작게에 씁니다")
 
     def _download_model(self) -> None:
         import threading
 
-        from ks_studio.services.face import download_face_models
+        from ks_studio.services.body import BODY_MODEL_MB, body_models_ready, download_body_models
+        from ks_studio.services.face import FACE_MODEL_MB, download_face_models, face_models_ready
 
         self._downloading = True
         self.model_button.setEnabled(False)
-        self.model_button.setText("얼굴 모델 내려받는 중…")
+        self.model_button.setText("AI 모델 내려받는 중…")
+        jobs = [(mb, fetch) for ready, mb, fetch in ((face_models_ready(), FACE_MODEL_MB, download_face_models),
+                                                     (body_models_ready(), BODY_MODEL_MB, download_body_models)) if not ready]
+        total = sum(mb for mb, _ in jobs) or 1
 
         def work() -> None:
             try:
-                download_face_models(self._model_progress.emit)
+                done = 0
+                for mb, fetch in jobs:  # 진행률은 크기 비율로 이어 붙인다
+                    fetch(lambda r, base=done, mb=mb: self._model_progress.emit((base + mb * r) / total))
+                    done += mb
             except Exception as e:  # 인터넷 끊김 등 — 화면에 알리고 다시 누를 수 있게
                 self._model_done.emit(str(e) or type(e).__name__)
                 return
@@ -349,9 +359,9 @@ class BeautifyPage(QWidget):
         self._downloading = False
         self._update_model_button()
         if error:
-            self.message.emit(f"⚠ 얼굴 모델을 내려받지 못했습니다: {error} — 인터넷 연결을 확인하고 다시 눌러 주세요", ERROR)
+            self.message.emit(f"⚠ AI 모델을 내려받지 못했습니다: {error} — 인터넷 연결을 확인하고 다시 눌러 주세요", ERROR)
             return
-        self.message.emit("얼굴 모델 다운로드 완료", INFO)
+        self.message.emit("AI 모델 다운로드 완료", INFO)
         if self._source is not None:  # 고른 영상이 있으면 바로 샘플 장면 고르기
             self._request_samples()
 
