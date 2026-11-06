@@ -24,7 +24,48 @@ log = logging.getLogger(__name__)
 
 MODEL = "large-v3"  # turbo는 번역(translate)을 배우지 않아 영어 자막에 못 쓴다
 MODEL_DIR = MODELS_DIR / "whisper"
+SPEECH_MODEL_MB = 3100  # 내려받는 크기 (안내·진행률용)
 SAMPLE_RATE = 16_000
+
+
+def _repo(folder: Path) -> Path:
+    return folder / f"models--Systran--faster-whisper-{MODEL}"
+
+
+def speech_model_ready(folder: Path = MODEL_DIR) -> bool:
+    """모델 본체(model.bin)까지 받았나 — 폴더만 보면 받다 끊긴 것도 '있음'이 된다."""
+    return any(f.stat().st_size > 0 for f in _repo(folder).glob("snapshots/*/model.bin"))
+
+
+def download_speech_model(on_progress=None, folder: Path = MODEL_DIR) -> None:
+    """음성 인식 모델을 미리 받아 둔다 (자막 만들기를 처음 누를 때 3GB를 기다리지 않게). 이어받기가 된다.
+
+    받는 쪽(huggingface_hub)이 진행률을 알려 주지 않아서, 받는 폴더 크기를 0.5초마다 재서 알린다.
+    """
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    from faster_whisper.utils import download_model
+
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(0.5):
+            size = 0
+            for f in _repo(folder).rglob("*"):
+                try:
+                    size += f.stat().st_size if f.is_file() else 0
+                except OSError:  # 받는 중에 이름이 바뀐 임시 파일
+                    pass
+            on_progress(min(0.99, size / (SPEECH_MODEL_MB * 1e6)))
+
+    watcher = threading.Thread(target=watch, daemon=True, name="speech-model-size") if on_progress else None
+    if watcher:
+        watcher.start()
+    try:
+        download_model(MODEL, cache_dir=str(folder))
+    finally:
+        stop.set()
+    if on_progress:
+        on_progress(1.0)
 
 
 def speech_unavailable_reason() -> str | None:
@@ -96,7 +137,7 @@ class SpeechWorker(QObject):
             os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows 심볼릭 링크 경고 (동작엔 상관없음)
             from faster_whisper import WhisperModel
 
-            done = (MODEL_DIR / f"models--Systran--faster-whisper-{MODEL}").exists()
+            done = speech_model_ready()
             self.status.emit(path, "음성 인식 모델 여는 중…" if done else "음성 인식 모델 내려받는 중 (처음 한 번, 약 3GB)…")
             try:
                 self._model = WhisperModel(MODEL, device="cuda", compute_type="float16", download_root=str(MODEL_DIR))

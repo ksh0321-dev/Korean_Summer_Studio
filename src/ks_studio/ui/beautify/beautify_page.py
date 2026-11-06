@@ -72,6 +72,7 @@ EFFECT_TABS = (  # (탭, ((BeautySettings 칸, 이름), ...)) — 턱 길이만 
     )),
 )
 EFFECT_NAMES = {field: name for _, rows in EFFECT_TABS for field, name in rows}
+FILL_CHOICES = (("telea", "빠르게"), ("migan", "자연스럽게 (MI-GAN)"), ("lama", "무늬까지 (LaMa, 느림)"))  # services.inpaint.FILLS
 BIPOLAR = {"chin"}
 
 
@@ -84,8 +85,6 @@ def _pixmap(rgb: np.ndarray) -> QPixmap:
 class BeautifyPage(QWidget):
     message = Signal(str, str)  # 상태 표시줄 알림
     indicator = Signal(str, str, str)
-    _model_progress = Signal(float)  # 얼굴 모델 내려받기 (작업 스레드 → 화면)
-    _model_done = Signal(str)  # 실패 이유, 성공이면 ""
 
     def __init__(self, sources: SourceCache, optimizer: Optimizer, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -155,8 +154,20 @@ class BeautifyPage(QWidget):
         preset_row.addWidget(self.preset_combo, 1)
         preset_row.addWidget(self.preset_save)
         preset_row.addWidget(self.preset_delete)
+        # 몸매·얼굴 작게로 사람이 비켜난 자리의 배경을 무엇으로 메꿀지 (모델을 안 받았으면 '빠르게'로 한다)
+        self.fill_combo = QComboBox()
+        for key, label in FILL_CHOICES:
+            self.fill_combo.addItem(label, key)
+        self.fill_combo.setToolTip("몸매·얼굴 작게로 드러난 배경을 메꾸는 방법. MI-GAN·LaMa는 위 '모델'에서 받아야 쓰인다\n"
+                                   "빠르게: 흐리게 번져 채움 · MI-GAN: 자연스럽게 (조금 느림) · LaMa: 나무결·벽지 같은 무늬를 가장 잘 이음 (더 느림)")
+        self.fill_combo.setCurrentIndex(self.fill_combo.findData(BeautySettings().fill))  # 영상을 고르기 전에도 기본값으로
+        self.fill_combo.currentIndexChanged.connect(self._on_effect_changed)
+        fill_row = QHBoxLayout()
+        fill_row.addWidget(QLabel("배경 메꾸기"))
+        fill_row.addWidget(self.fill_combo, 1)
         effects_layout = QVBoxLayout(effects)
         effects_layout.addWidget(tabs)
+        effects_layout.addLayout(fill_row)
         effects_layout.addLayout(preset_row)
         self.preview_check = QCheckBox("OK 뒤 미리보기 켜기 (느린 PC는 끄기)")
         self.preview_check.toggled.connect(self._on_preview_toggled)
@@ -164,13 +175,8 @@ class BeautifyPage(QWidget):
         left.setMinimumWidth(LEFT_MIN_WIDTH)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        # 얼굴 모델: 없으면 눌러서 내려받는다 (저절로 받지 않는다 — 약 290MB). 있으면 '완료'로 보인다
-        self.model_button = QPushButton()
-        self.model_button.clicked.connect(self._download_model)
-        self._model_progress.connect(lambda r: self.model_button.setText(f"AI 모델 내려받는 중… {int(r * 100)}%"))
-        self._model_done.connect(self._on_model_done)
-        self._downloading = False
-        left_layout.addWidget(self.model_button)
+        # 모델: 하나씩 눌러서 내려받는다 (저절로 받지 않는다). 받은 것은 '✓'로 보인다
+        left_layout.addLayout(self._model_row())
         header = QHBoxLayout()
         header.addWidget(QLabel("원본"))
         header.addStretch(1)
@@ -309,61 +315,57 @@ class BeautifyPage(QWidget):
         self.preview_check.blockSignals(False)
         self._fill_list()
         self._fill_presets()
-        self._update_model_button()
+        for button in self.model_buttons.values():
+            button.refresh()
 
-    # ── 얼굴 모델 ────────────────────────────────────────────────
+    # ── 모델 내려받기 ────────────────────────────────────────────
 
-    def _update_model_button(self) -> None:
-        if self._downloading:
-            return
-        if self._unavailable is not None:  # AI 패키지가 없다 (안내는 가운데 화면에)
-            self.model_button.setText("AI 보정 패키지 없음")
-            self.model_button.setEnabled(False)
-            return
-        from ks_studio.services.body import BODY_MODEL_MB, body_models_ready
-        from ks_studio.services.face import FACE_MODEL_MB, face_models_ready
-
-        size = (0 if face_models_ready() else FACE_MODEL_MB) + (0 if body_models_ready() else BODY_MODEL_MB)
-        self.model_button.setText("✓ 모델 다운로드 완료" if not size else f"⬇ AI 모델 내려받기 (약 {size}MB)")
-        self.model_button.setEnabled(bool(size))
-        self.model_button.setToolTip("" if not size else "AI 보정에 쓰는 얼굴·몸 모델을 models 폴더에 내려받습니다 "
-                                     "(인터넷 필요, 처음 한 번). 몸 모델은 몸매·얼굴 작게에 씁니다")
-
-    def _download_model(self) -> None:
-        import threading
-
+    def _model_row(self) -> QGridLayout:
+        """얼굴(AI 보정) · 몸매(몸매·얼굴 작게) · 자막(음성 인식) · MI-GAN · LaMa(배경 메꾸기) 모델 버튼."""
         from ks_studio.services.body import BODY_MODEL_MB, body_models_ready, download_body_models
         from ks_studio.services.face import FACE_MODEL_MB, download_face_models, face_models_ready
+        from ks_studio.services.inpaint import FILL_MODELS, download_fill_model, fill_model_ready
+        from ks_studio.services.speech import (
+            SPEECH_MODEL_MB,
+            download_speech_model,
+            speech_model_ready,
+            speech_unavailable_reason,
+        )
+        from ks_studio.ui.widgets.model_button import ModelButton
 
-        self._downloading = True
-        self.model_button.setEnabled(False)
-        self.model_button.setText("AI 모델 내려받는 중…")
-        jobs = [(mb, fetch) for ready, mb, fetch in ((face_models_ready(), FACE_MODEL_MB, download_face_models),
-                                                     (body_models_ready(), BODY_MODEL_MB, download_body_models)) if not ready]
-        total = sum(mb for mb, _ in jobs) or 1
+        self.model_buttons = {
+            "face": ModelButton("얼굴", FACE_MODEL_MB, face_models_ready, download_face_models, "AI 보정 전체 (얼굴 찾기·랜드마크)"),
+            "body": ModelButton("몸매", BODY_MODEL_MB, body_models_ready, download_body_models, "몸매 보정·얼굴 작게"),
+            "speech": ModelButton("자막", SPEECH_MODEL_MB, speech_model_ready, download_speech_model,
+                                  "컷편집의 음성으로 자막 만들기 (안 받아 두면 처음 만들 때 받는다)"),
+        }
+        for kind, (name, _file, _url, size) in FILL_MODELS.items():
+            self.model_buttons[kind] = ModelButton(
+                name, size, lambda kind=kind: fill_model_ready(kind),
+                lambda on_progress, kind=kind: download_fill_model(kind, on_progress),
+                "몸매·얼굴 작게로 드러난 배경 메꾸기 (효과 아래 '배경 메꾸기'에서 고른다)")
+        for kind in ("face", "body", *FILL_MODELS):
+            self.model_buttons[kind].set_missing(self._unavailable)
+        self.model_buttons["speech"].set_missing(speech_unavailable_reason())
+        grid = QGridLayout()
+        grid.addWidget(QLabel("모델"), 0, 0)
+        for index, (kind, button) in enumerate(self.model_buttons.items()):
+            button.finished.connect(lambda error, kind=kind: self._on_model_done(kind, error))
+            grid.addWidget(button, index // 3, 1 + index % 3)
+        for column in (1, 2, 3):
+            grid.setColumnStretch(column, 1)
+        return grid
 
-        def work() -> None:
-            try:
-                done = 0
-                for mb, fetch in jobs:  # 진행률은 크기 비율로 이어 붙인다
-                    fetch(lambda r, base=done, mb=mb: self._model_progress.emit((base + mb * r) / total))
-                    done += mb
-            except Exception as e:  # 인터넷 끊김 등 — 화면에 알리고 다시 누를 수 있게
-                self._model_done.emit(str(e) or type(e).__name__)
-                return
-            self._model_done.emit("")
-
-        threading.Thread(target=work, daemon=True, name="face-model-download").start()
-
-    def _on_model_done(self, error: str) -> None:
-        self._downloading = False
-        self._update_model_button()
+    def _on_model_done(self, kind: str, error: str) -> None:
+        name = self.model_buttons[kind].name
         if error:
-            self.message.emit(f"⚠ AI 모델을 내려받지 못했습니다: {error} — 인터넷 연결을 확인하고 다시 눌러 주세요", ERROR)
+            self.message.emit(f"⚠ {name} 모델을 내려받지 못했습니다: {error} — 인터넷 연결을 확인하고 다시 눌러 주세요", ERROR)
             return
-        self.message.emit("AI 모델 다운로드 완료", INFO)
-        if self._source is not None:  # 고른 영상이 있으면 바로 샘플 장면 고르기
+        self.message.emit(f"{name} 모델 다운로드 완료", INFO)
+        if kind == "face" and self._source is not None:  # 고른 영상이 있으면 바로 샘플 장면 고르기
             self._request_samples()
+        elif kind != "speech":  # 몸매·얼굴 작게·배경 메꾸기가 이제 들어간다
+            self._redraw()
 
     def deactivate(self) -> None:
         self.clip_player.player.pause()
@@ -551,6 +553,9 @@ class BeautifyPage(QWidget):
         self.shadow_color.blockSignals(True)
         self.shadow_color.setCurrentIndex(max(0, self.shadow_color.findData(settings.eyeshadow_color)))
         self.shadow_color.blockSignals(False)
+        self.fill_combo.blockSignals(True)
+        self.fill_combo.setCurrentIndex(max(0, self.fill_combo.findData(settings.fill)))
+        self.fill_combo.blockSignals(False)
 
     # ── 프리셋 ──────────────────────────────────────────────────
 
@@ -619,6 +624,7 @@ class BeautifyPage(QWidget):
         self._set_settings(
             **{field: slider.value() / 100 for field, slider in self.sliders.items()},
             eyeshadow_color=self.shadow_color.currentData(),
+            fill=self.fill_combo.currentData(),
         )
         self._effect_timer.start()
 
@@ -800,7 +806,7 @@ class BeautifyPage(QWidget):
     def _update_controls(self) -> None:
         ready = self.worker is not None and self._source is not None and bool(self._samples)
         rendering = self.worker is not None and self.worker.busy_with is not None
-        for widget in (*self.sliders.values(), self.shadow_color, self.resample_button, self.approve_button,
+        for widget in (*self.sliders.values(), self.shadow_color, self.fill_combo, self.resample_button, self.approve_button,
                        self.preset_combo, self.preset_save):
             widget.setEnabled(ready)
         self.preset_delete.setEnabled(ready and self._preset_name() is not None)

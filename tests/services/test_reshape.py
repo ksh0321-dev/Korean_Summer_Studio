@@ -131,3 +131,16 @@ def test_apply_frame_reshapes_whole_frame_without_face():
     y_out = outside(person)
     assert (after[:SIZE][y_out] == before[:SIZE][y_out]).all()  # Y 판
     assert apply_frame(frame, None, BeautySettings(legs=1.0)) is frame  # 몸 정보가 없으면 그대로
+
+
+def test_head_resegmentation_overrides_coarse_layer_in_its_box():
+    """머리 둘레를 다시 분리한 결과가 그 상자 안에서 이긴다 (가장자리에서는 서서히) — 귀걸이·잔머리가 사람 층에 든다."""
+    from ks_studio.services.reshape import GRID, _person_layer
+
+    coarse = parts_of()  # 전체 분리: 사람이 없다고 봤다
+    head = parts_of((np.ones((SIZE, SIZE), np.uint8), CLOTHES))  # 머리 둘레 다시 분리: 상자 전체가 사람
+    body = BodyInfo(coarse, None, (head, (200, 200, 600, 600)))
+    alpha = _person_layer(body, SIZE // GRID + 1, SIZE // GRID + 1)
+    assert alpha[400 // GRID, 400 // GRID] > 0.99  # 상자 가운데
+    assert alpha[100 // GRID, 100 // GRID] == 0  # 상자 밖은 전체 분리 그대로
+    assert 0 < alpha[400 // GRID, 205 // GRID] < 0.5  # 상자 가장자리는 서서히

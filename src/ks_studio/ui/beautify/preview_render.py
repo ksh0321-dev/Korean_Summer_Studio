@@ -11,6 +11,7 @@ import numpy as np
 from ks_studio.core.beauty import BeautySettings
 from ks_studio.services.beautify import apply, regions
 from ks_studio.services.body import body_models_ready
+from ks_studio.services.inpaint import make_fill
 from ks_studio.services.reshape import BODY_EFFECTS, body_for_image, needs_body
 
 WORK_SCALE = 2  # 샘플 컷은 보여 줄 크기의 2배 해상도에서 효과를 계산한다 (줄였을 때 또렷하게)
@@ -38,7 +39,9 @@ def face_square(shape, landmarks: np.ndarray) -> tuple[int, int, int, int]:
 
 def _body(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySettings):
     """몸매·얼굴 작게를 켰고 몸 모델이 있으면 그 그림의 사람 분석 (없으면 None — 그 효과만 빠진다)."""
-    return body_for_image(rgb, landmarks) if needs_body(settings) and body_models_ready() else None
+    if not (needs_body(settings) and body_models_ready()):
+        return None
+    return body_for_image(rgb, landmarks, fill=make_fill(settings.fill))  # 한 장이라 기억·섞기는 없다
 
 
 def _fit(image: np.ndarray, size: int) -> np.ndarray:

@@ -62,6 +62,7 @@ from ks_studio.services.face import (
 )
 from ks_studio.services.body import body_models_ready
 from ks_studio.services.foreground import yield_to_playback
+from ks_studio.services.inpaint import MemoryFill, make_fill
 from ks_studio.services.reshape import BODY_EFFECTS, BodyFrames, BodyInfo, needs_body, overlay, reshape
 from ks_studio.services.optimize import add_video_stream, make_optimized
 from ks_studio.services.yuv import from_planes, planes
@@ -620,7 +621,9 @@ def _zoom(image: np.ndarray, zoom: Zoom) -> None:
 
 def body_frames(settings: BeautySettings) -> BodyFrames | None:
     """몸매·얼굴 작게를 켰고 몸 모델이 있으면 프레임마다 사람을 분석하는 함수 (없으면 None — 그 효과만 빠진다)."""
-    return BodyFrames() if needs_body(settings) and body_models_ready() else None
+    if not (needs_body(settings) and body_models_ready()):
+        return None
+    return BodyFrames(MemoryFill(make_fill(settings.fill)))  # 영상 내내 하나: 예전에 본 배경을 기억하고 앞 프레임과 섞는다
 
 
 def render_beautified(path: Path, output: Path, track: np.ndarray, settings: BeautySettings, on_progress=None) -> None:

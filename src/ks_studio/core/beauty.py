@@ -104,6 +104,7 @@ class BeautySettings:
     waist: float = 0.0  # 허리 잘록 (몸매 — 몸의 점·사람 분리 모델)
     shoulders: float = 0.0  # 어깨 좁게
     legs: float = 0.0  # 다리 길게
+    fill: str = "migan"  # 몸매·얼굴 작게로 드러난 배경 메꾸기: telea(빠르게) · migan · lama (services.inpaint.FILLS)
     approved: bool = False  # 샘플 컷을 보고 OK했는지 — 그 뒤에야 미리보기와 보정본 만들기를 한다
     target: tuple[float, ...] | None = None  # 보정할 사람의 얼굴 인식값 (없으면 가장 큰 얼굴)
 
