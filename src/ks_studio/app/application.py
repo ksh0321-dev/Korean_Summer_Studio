@@ -1,6 +1,7 @@
 """조립 지점: QApplication을 만들고 테마를 입힌 뒤 메인 창을 띄운다."""
 
 import logging
+import logging.handlers
 import sys
 from pathlib import Path
 
@@ -9,7 +10,8 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QStyle
 
 from ks_studio.app.fonts import family, register_fonts
-from ks_studio.app.paths import DEFAULT_WORKSPACE, SETTINGS_PATH, migrate_user_files
+from ks_studio import __version__
+from ks_studio.app.paths import DEFAULT_WORKSPACE, FROZEN, SETTINGS_PATH, USER_DIR, migrate_user_files
 from ks_studio.core.settings import AppSettings
 from ks_studio.services.devices import DeviceMonitor
 from ks_studio.ui.main_window import MainWindow
@@ -29,8 +31,23 @@ def initial_window_size(screen: tuple[int, int], available: tuple[int, int]) -> 
     return round(width), round(height)
 
 
+def _setup_logging() -> None:
+    """소스로 돌리면 터미널에, exe면(터미널이 없다) user/logs/ks_studio.log에 남긴다 — 다른 PC에서 문제를 볼 때 이 파일을 본다."""
+    handlers = None
+    if FROZEN:
+        log_dir = USER_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handlers = [logging.handlers.RotatingFileHandler(log_dir / "ks_studio.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")]
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", handlers=handlers)
+    logging.getLogger(__name__).info("KS Studio %s 시작 (%s)", __version__, "exe" if FROZEN else "소스")
+
+
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    _setup_logging()
+    if "--selftest" in sys.argv:  # 배포한 PC에서 GPU·모델·인코더가 도는지 확인 (user/logs/selftest.txt)
+        from ks_studio.app.selftest import run
+
+        return run()
     app = QApplication(sys.argv)
     app.setApplicationName("KS Studio")
     register_fonts()  # 테마(qss)가 Pretendard를 쓰므로 먼저

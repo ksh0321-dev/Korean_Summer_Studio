@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ks_studio import __version__
 from ks_studio.app.paths import app_relative, from_app_relative
 from ks_studio.core.project import Project
 from ks_studio.core.settings import AppSettings, DeviceRef, with_recent_project
@@ -261,7 +262,7 @@ class MainWindow(QMainWindow):
 
     def _update_title(self) -> None:
         name = self._workspace().root.name
-        self.setWindowTitle(f"KS Studio — {name}")
+        self.setWindowTitle(f"KS Studio {__version__} — {name}")
         self.project_button.setText(f"프로젝트: {name}")
 
     # ── 설정 ────────────────────────────────────────────────────

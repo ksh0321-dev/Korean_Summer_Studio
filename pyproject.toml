@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ks-studio"
-version = "0.1.0"
+dynamic = ["version"]  # src/ks_studio/__init__.py의 __version__
 description = "Korean Summer 녹화 + 컷편집 + AI 보정 + 내보내기"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,14 +14,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pillow"]  # pillow: tools/spikes 분석 스크립트용
+dev = ["pytest", "pillow"]
+build = ["pyinstaller>=6.10"]  # tools/build_exe.py (배포용 exe)  # pillow: tools/spikes 분석 스크립트용
 # AI 보정·자막 음성 인식 (선택). insightface·faster-whisper가 CPU용 onnxruntime을 같이 깔면 GPU판을 덮어쓴다 →
 # 설치 뒤 `pip uninstall -y onnxruntime onnxruntime-gpu` 후 `pip install "onnxruntime-gpu[cuda,cudnn]"`로 GPU판만 남긴다.
 # (faster-whisper는 `pip install --no-deps faster-whisper ctranslate2` + `pip install huggingface_hub tokenizers`로 깔면 처음부터 안전)
-ai = ["insightface>=2.0", "onnxruntime-gpu[cuda,cudnn]", "opencv-python", "faster-whisper>=1.2", "ctranslate2>=4.8"]
+# ctranslate2(음성 인식)는 CUDA 12 cuBLAS를 쓴다 → nvidia-cublas-cu12 (CUDA 툴킷 설치 없이)
+ai = ["insightface>=2.0", "onnxruntime-gpu[cuda,cudnn]", "opencv-python", "faster-whisper>=1.2", "ctranslate2>=4.8", "nvidia-cublas-cu12>=12.8"]
 
 [project.gui-scripts]
 ks-studio = "ks_studio.app.application:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "ks_studio.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

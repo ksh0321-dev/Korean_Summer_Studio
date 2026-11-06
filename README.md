@@ -46,4 +46,9 @@ python tools\build_exe.py
 ```
 
 `dist\KS_Studio-<버전>\` 폴더가 생긴다. 폴더째 복사하면 Python·CUDA가 없는 PC에서도 `KS Studio.exe`로 바로 실행된다
-(NVIDIA GPU가 있으면 GPU로, 없으면 CPU로). 버전은 `pyproject.toml`의 `version` 하나로 관리한다.
+(NVIDIA 드라이버가 있으면 GPU로, 없으면 CPU로). CUDA·cuDNN DLL은 exe 폴더에 들어 있다.
+
+- 버전: `src/ks_studio/__init__.py`의 `__version__` 하나 (폴더 이름·창 제목이 따른다)
+- 인터넷이 없는 PC용: `python tools\build_exe.py --with-models` (모델까지 넣는다, +약 3GB)
+- 배포한 PC에서 점검: `"KS Studio.exe" --selftest` → `user\logs\selftest.txt` (글꼴·영상 재생·인코더·얼굴 모델·음성 인식이 GPU로 도는지)
+- 문제가 생기면 `user\logs\ks_studio.log`
