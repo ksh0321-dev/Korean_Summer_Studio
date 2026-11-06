@@ -1,0 +1,49 @@
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 빌드 결과 (tools/build_exe.py)
+/build/
+/dist/
+
+# 편집기·도구 개인 설정
+.vscode/
+.claude/
+
+# ── 개인 데이터: 저장소에 올리지 않는다 ─────────────────────────
+# 개인 설정(장치·싱크 보정·최근 프로젝트)·프리셋·기본 프로젝트 (app/paths.py USER_DIR)
+/user/
+# AI 모델 (처음 쓸 때 내려받음, 수 GB)
+/models/
+# 예전 위치의 개인 설정 (앱을 켜면 user/로 옮긴다)
+/settings.json
+/preset/
+
+# 저장소 폴더를 그대로 프로젝트로 쓸 때 생기는 것 (개발용 테스트 프로젝트)
+/project.json
+/project.tmp
+/recordings/
+/media/
+/cache/
+/ai/
+/subtitles/
+/exports/
+/workspace/
+/.test/
+/sample_video_summer/
+/sample_video_phone/
+
+# 영상은 어디에 있어도 올리지 않는다 (용량)
+*.mp4
+*.mov
+*.MOV
+*.mkv
+*.m4v
+*.avi
+*.webm
+*.part
+
+# 커밋 환경을 갖추기 전 임시 백업 (나중에 지운다)
+/backup/

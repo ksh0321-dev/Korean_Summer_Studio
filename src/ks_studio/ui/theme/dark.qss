@@ -1,0 +1,204 @@
+QWidget {
+    background: #1b1b1f;
+    color: #e6e6e9;
+    font-family: "Pretendard", "Malgun Gothic";  /* app/fonts.py가 등록 */
+    font-size: 10pt;
+}
+
+#topBar {
+    background: #111114;
+    border-bottom: 1px solid #2c2c33;
+}
+
+#appTitle {
+    font-size: 12pt;
+    font-weight: bold;
+    background: transparent;
+}
+
+QPushButton {
+    background: #2a2a31;
+    border: 1px solid #3a3a43;
+    border-radius: 6px;
+    padding: 6px 14px;
+}
+
+QPushButton:hover {
+    background: #34343c;
+}
+
+QToolButton {
+    background: #2a2a31;
+    border: 1px solid #3a3a43;
+    border-radius: 5px;
+    padding: 4px 9px;
+}
+
+QToolButton:hover {
+    background: #34343c;
+}
+
+QToolButton:disabled {
+    color: #55555e;
+}
+
+QToolButton:checked {
+    background: #1f3f3c;
+    border: 1px solid #3fd1c7;
+    color: #ffffff;
+}
+
+#toolbarSeparator {
+    color: #3a3a43;
+}
+
+QPushButton:checked {
+    background: #1f3f3c;
+    border: 1px solid #3fd1c7;
+    color: #ffffff;
+}
+
+#hint {
+    color: #6f6f78;
+    font-size: 9pt;
+}
+
+#deviceStatus {
+    background: transparent;
+    color: #9a9aa3;
+}
+
+#deviceStatus[warning="true"] {
+    color: #ff6b6b;
+}
+
+#syncStatus[warning="true"] {
+    color: #f1c40f;
+}
+
+#recordButton {
+    background: #c0392b;
+    border: none;
+    font-size: 12pt;
+    font-weight: bold;
+    padding: 12px;
+}
+
+#recordButton:hover {
+    background: #d84a3b;
+}
+
+#recordButton[recording="true"] {
+    background: #3a3a43;
+}
+
+#recordButton:disabled {
+    background: #2a2a31;
+    color: #6f6f78;
+}
+
+QPushButton:disabled {
+    color: #6f6f78;
+}
+
+#stageButton {
+    background: transparent;
+    border: none;
+    padding: 6px 16px;
+    color: #9a9aa3;
+}
+
+#stageButton:checked {
+    color: #ffffff;
+    border-bottom: 2px solid #3fd1c7;
+}
+
+QSplitter::handle {
+    background: #1b1b1f;
+}
+
+QSplitter::handle:horizontal {
+    width: 6px;
+}
+
+QSplitter::handle:vertical {
+    height: 6px;
+}
+
+QSplitter::handle:hover {
+    background: #3fd1c7;
+}
+
+QComboBox {
+    background: #2a2a31;
+    border: 1px solid #3a3a43;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
+QTabWidget::pane {
+    border: none;
+}
+
+QTabBar::tab {
+    background: #222228;
+    padding: 6px 14px;
+    color: #9a9aa3;
+}
+
+QTabBar::tab:selected {
+    color: #ffffff;
+    background: #2a2a31;
+}
+
+QStatusBar {
+    background: #111114;
+    border-top: 1px solid #2a2a31;
+}
+
+QStatusBar::item {
+    border: none;
+}
+
+#statusMessage, #statusIndicator {
+    color: #9a9aa3;
+    padding: 0 8px;
+}
+
+#statusMessage[level="warning"], #statusIndicator[level="warning"] {
+    color: #f1c40f;
+}
+
+#statusMessage[level="error"], #statusIndicator[level="error"],
+#statusMessage[level="live"], #statusIndicator[level="live"] {
+    color: #ff6b6b;
+    font-weight: bold;
+}
+
+QListWidget::item:selected {
+    background: #1f3f3c;
+    border: 1px solid #3fd1c7;
+    color: #ffffff;
+}
+
+/* 영상 목록 한 줄 (이름 · 날짜·길이 · 메모) */
+#sourceName {
+    font-weight: bold;
+    background: transparent;
+}
+#sourceMeta {
+    color: #9a9aa3;
+    background: transparent;
+}
+
+/* 표 머리줄 (자막 줄 표) */
+QHeaderView::section {
+    background: #26262d;
+    color: #9a9aa3;
+    border: none;
+    border-right: 1px solid #33333b;
+    padding: 4px 6px;
+}
+QTableWidget {
+    gridline-color: #33333b;
+}

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ks-studio"
+version = "0.1.0"
+description = "Korean Summer 녹화 + 컷편집 + AI 보정 + 내보내기"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.8",
+    "av>=14",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pillow"]  # pillow: tools/spikes 분석 스크립트용
+# AI 보정·자막 음성 인식 (선택). insightface·faster-whisper가 CPU용 onnxruntime을 같이 깔면 GPU판을 덮어쓴다 →
+# 설치 뒤 `pip uninstall -y onnxruntime onnxruntime-gpu` 후 `pip install "onnxruntime-gpu[cuda,cudnn]"`로 GPU판만 남긴다.
+# (faster-whisper는 `pip install --no-deps faster-whisper ctranslate2` + `pip install huggingface_hub tokenizers`로 깔면 처음부터 안전)
+ai = ["insightface>=2.0", "onnxruntime-gpu[cuda,cudnn]", "opencv-python", "faster-whisper>=1.2", "ctranslate2>=4.8"]
+
+[project.gui-scripts]
+ks-studio = "ks_studio.app.application:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ks_studio = ["ui/theme/*.qss", "assets/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]  # backup/ 같은 사본 폴더의 테스트를 모으지 않게
