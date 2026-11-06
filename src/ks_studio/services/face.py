@@ -28,6 +28,60 @@ PERSON_FRONTAL = 0.5  # '보정할 사람' 목록은 이만큼 정면인 얼굴�
 LANDMARKS = 106
 
 
+FACE_MODEL_URL = f"https://github.com/deepinsight/insightface/releases/download/model-zoo/{MODEL_PACK}.zip"
+FACE_MODEL_FILES = ("det_10g.onnx", "2d106det.onnx", "w600k_r50.onnx")  # 얼굴 찾기 · 106점 · 인식값 (쓰는 것만)
+FACE_MODEL_MB = 290  # 내려받는 크기 (안내용)
+DOWNLOAD_CHUNK = 1 << 20
+
+
+def face_model_dir(models_dir: Path = MODELS_DIR) -> Path:
+    return models_dir / "models" / MODEL_PACK  # InsightFace가 찾는 자리 (root/models/<pack>)
+
+
+def face_models_ready(models_dir: Path = MODELS_DIR) -> bool:
+    """쓰는 모델 파일이 다 있는지. InsightFace는 폴더만 있으면 받은 것으로 쳐서, 받다 끊긴 경우도 '있음'이 된다."""
+    folder = face_model_dir(models_dir)
+    return all((folder / name).is_file() and (folder / name).stat().st_size > 0 for name in FACE_MODEL_FILES)
+
+
+def download_face_models(on_progress=None, models_dir: Path = MODELS_DIR, url: str = FACE_MODEL_URL) -> None:
+    """얼굴 모델 묶음을 내려받아 푼다. 받는 중·푸는 중엔 임시 이름이라, 끊겨도 '받은 것'으로 보이지 않는다."""
+    import os
+    import shutil
+    import urllib.request
+    import zipfile
+
+    folder = face_model_dir(models_dir)
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    archive = folder.with_name(folder.name + ".zip.part")
+    staging = folder.with_name(folder.name + ".part")
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "KS-Studio"})
+        with urllib.request.urlopen(request, timeout=30) as response, open(archive, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            while chunk := response.read(DOWNLOAD_CHUNK):
+                out.write(chunk)
+                done += len(chunk)
+                if on_progress and total:
+                    on_progress(min(1.0, done / total))
+        shutil.rmtree(staging, ignore_errors=True)
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(staging)
+        for name in FACE_MODEL_FILES:  # 묶음 안에 폴더가 한 겹 더 있어도 찾아 올린다
+            found = next(staging.rglob(name), None)
+            if found is None:
+                raise RuntimeError(f"내려받은 묶음에 {name}이 없습니다")
+            if found.parent != staging:
+                shutil.move(str(found), str(staging / name))
+        if folder.exists():
+            shutil.rmtree(folder)
+        os.replace(staging, folder)
+    finally:
+        archive.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def ai_unavailable_reason() -> str | None:
     """AI 패키지가 없으면 설치 안내, 있으면 None."""
     try:

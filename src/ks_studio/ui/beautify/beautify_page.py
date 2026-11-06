@@ -82,6 +82,8 @@ def _pixmap(rgb: np.ndarray) -> QPixmap:
 class BeautifyPage(QWidget):
     message = Signal(str, str)  # 상태 표시줄 알림
     indicator = Signal(str, str, str)
+    _model_progress = Signal(float)  # 얼굴 모델 내려받기 (작업 스레드 → 화면)
+    _model_done = Signal(str)  # 실패 이유, 성공이면 ""
 
     def __init__(self, sources: SourceCache, optimizer: Optimizer, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -160,6 +162,13 @@ class BeautifyPage(QWidget):
         left.setMinimumWidth(LEFT_MIN_WIDTH)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
+        # 얼굴 모델: 없으면 눌러서 내려받는다 (저절로 받지 않는다 — 약 290MB). 있으면 '완료'로 보인다
+        self.model_button = QPushButton()
+        self.model_button.clicked.connect(self._download_model)
+        self._model_progress.connect(lambda r: self.model_button.setText(f"얼굴 모델 내려받는 중… {int(r * 100)}%"))
+        self._model_done.connect(self._on_model_done)
+        self._downloading = False
+        left_layout.addWidget(self.model_button)
         header = QHBoxLayout()
         header.addWidget(QLabel("원본"))
         header.addStretch(1)
@@ -298,6 +307,52 @@ class BeautifyPage(QWidget):
         self.preview_check.blockSignals(False)
         self._fill_list()
         self._fill_presets()
+        self._update_model_button()
+
+    # ── 얼굴 모델 ────────────────────────────────────────────────
+
+    def _update_model_button(self) -> None:
+        if self._downloading:
+            return
+        if self._unavailable is not None:  # AI 패키지가 없다 (안내는 가운데 화면에)
+            self.model_button.setText("AI 보정 패키지 없음")
+            self.model_button.setEnabled(False)
+            return
+        from ks_studio.services.face import FACE_MODEL_MB, face_models_ready
+
+        ready = face_models_ready()
+        self.model_button.setText("✓ 모델 다운로드 완료" if ready else f"⬇ 얼굴 모델 내려받기 (약 {FACE_MODEL_MB}MB)")
+        self.model_button.setEnabled(not ready)
+        self.model_button.setToolTip("" if ready else "AI 보정에 쓰는 얼굴 모델을 models 폴더에 내려받습니다 (인터넷 필요, 처음 한 번)")
+
+    def _download_model(self) -> None:
+        import threading
+
+        from ks_studio.services.face import download_face_models
+
+        self._downloading = True
+        self.model_button.setEnabled(False)
+        self.model_button.setText("얼굴 모델 내려받는 중…")
+
+        def work() -> None:
+            try:
+                download_face_models(self._model_progress.emit)
+            except Exception as e:  # 인터넷 끊김 등 — 화면에 알리고 다시 누를 수 있게
+                self._model_done.emit(str(e) or type(e).__name__)
+                return
+            self._model_done.emit("")
+
+        threading.Thread(target=work, daemon=True, name="face-model-download").start()
+
+    def _on_model_done(self, error: str) -> None:
+        self._downloading = False
+        self._update_model_button()
+        if error:
+            self.message.emit(f"⚠ 얼굴 모델을 내려받지 못했습니다: {error} — 인터넷 연결을 확인하고 다시 눌러 주세요", ERROR)
+            return
+        self.message.emit("얼굴 모델 다운로드 완료", INFO)
+        if self._source is not None:  # 고른 영상이 있으면 바로 샘플 장면 고르기
+            self._request_samples()
 
     def deactivate(self) -> None:
         self.clip_player.player.pause()
@@ -398,6 +453,11 @@ class BeautifyPage(QWidget):
         """샘플 후보 장면: 한 번 찾은 영상은 프로젝트 캐시에서 바로. [샘플 다시 고르기]는 새로 찾는다."""
         from ks_studio.services.face import samples_cache
 
+        from ks_studio.services.face import face_models_ready
+
+        if not face_models_ready():
+            self._set_notice("얼굴 모델이 아직 없습니다 — 왼쪽 위 [⬇ 얼굴 모델 내려받기]를 눌러 주세요 (처음 한 번)")
+            return
         media = self._media()
         if media is None:
             return

@@ -67,3 +67,23 @@ def test_sample_probes_cache_roundtrip(tmp_path):
     assert np.allclose(back[0].faces[1].landmarks, face.landmarks) and np.allclose(back[0].faces[0].embedding, face.embedding)
     assert np.abs(back[1].rgb.astype(int) - 120).max() <= 3  # JPEG
     assert load_probes(tmp_path / "missing.npz") is None
+
+
+def test_face_model_download_detects_and_unpacks(tmp_path):
+    """모델이 없으면 '없음', 내려받으면 쓰는 파일 셋이 제자리에 (묶음 안 폴더가 한 겹 더 있어도)."""
+    import zipfile
+
+    from ks_studio.services.face import FACE_MODEL_FILES, download_face_models, face_model_dir, face_models_ready
+
+    models = tmp_path / "models"
+    assert not face_models_ready(models)
+    face_model_dir(models).mkdir(parents=True)  # 받다 끊겨 폴더만 남은 경우
+    assert not face_models_ready(models)
+    pack = tmp_path / "pack.zip"
+    with zipfile.ZipFile(pack, "w") as zf:
+        for name in FACE_MODEL_FILES:
+            zf.writestr(f"buffalo_l/{name}", b"onnx")
+    seen = []
+    download_face_models(seen.append, models_dir=models, url=pack.as_uri())
+    assert face_models_ready(models) and seen and seen[-1] == 1.0
+    assert not any(p.name.endswith(".part") for p in (models / "models").iterdir())  # 임시 파일 정리
