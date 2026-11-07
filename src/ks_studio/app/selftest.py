@@ -1,7 +1,8 @@
 """`KS Studio.exe --selftest`: 이 PC에서 필요한 것이 다 도는지 확인하고 user/logs/selftest.txt에 적는다.
 
 다른 PC(Python·CUDA 없음)에 배포했을 때 GPU가 실제로 쓰이는지 한 번에 본다:
-글꼴 · Qt 영상 재생 · 영상 인코더(NVENC/CPU) · 얼굴 모델(onnxruntime CUDA) · 음성 인식(ctranslate2 CUDA).
+글꼴 · Qt 영상 재생 · 영상 인코더(NVENC/CPU) · 얼굴 모델(onnxruntime CUDA) · 몸매 모델(rtmlib) · 배경 메꾸기(MI-GAN·LaMa)
+· 음성 인식(ctranslate2 CUDA).
 모델 파일이 아직 없으면 그 항목은 '모델 없음'으로 건너뛴다 (내려받지 않는다).
 """
 
@@ -57,6 +58,36 @@ def _faces():
     return f"사용 {used[0]} · 가능 {providers}"
 
 
+def _body():
+    import numpy as np
+    import rtmlib  # noqa: F401 — exe에 들어갔는지 (모델이 없어도 확인)
+
+    from ks_studio.services.body import BodyAnalyzer, body_models_ready
+
+    if not body_models_ready():
+        return "rtmlib 있음 · 모델 없음 (AI 탭 '모델'에서 받음)"
+    analyzer = BodyAnalyzer.shared()
+    rgb = np.zeros((960, 540, 3), np.uint8)
+    analyzer.parts(rgb)
+    analyzer.keypoints(rgb, (0, 0, 540, 960))
+    return f"사용 {analyzer._parts.get_providers()[0]}"
+
+
+def _inpaint():
+    import numpy as np
+
+    from ks_studio.services.inpaint import FILL_MODELS, INPAINT_DIR, _run_model, _session, fill_model_ready
+
+    found = []
+    for kind in FILL_MODELS:
+        if not fill_model_ready(kind):
+            found.append(f"{kind} 모델 없음")
+            continue
+        _run_model(kind, INPAINT_DIR, [np.zeros((512, 512, 3), np.uint8)], [np.ones((512, 512), np.uint8)])
+        found.append(f"{kind} {_session(kind, INPAINT_DIR).get_providers()[0]}")
+    return " · ".join(found)
+
+
 def _speech():
     import ctranslate2
     import numpy as np
@@ -80,7 +111,8 @@ def run() -> int:
 
     app = QApplication.instance() or QApplication([])  # noqa: F841 (글꼴·영상 재생에 필요)
     lines = [f"KS Studio {__version__} 자체 점검 · {'exe' if FROZEN else '소스'} · {platform.platform()}", f"앱 폴더: {APP_DIR}"]
-    for name, fn in (("글꼴", _fonts), ("영상 재생", _player), ("영상 인코더", _encoder), ("얼굴 모델", _faces), ("음성 인식", _speech)):
+    for name, fn in (("글꼴", _fonts), ("영상 재생", _player), ("영상 인코더", _encoder), ("얼굴 모델", _faces), ("몸매 모델", _body),
+                     ("배경 메꾸기", _inpaint), ("음성 인식", _speech)):
         _check(name, fn, lines)
     out = USER_DIR / "logs" / "selftest.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
