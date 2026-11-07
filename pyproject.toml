@@ -20,9 +20,17 @@ build = ["pyinstaller>=6.10"]  # tools/build_exe.py (배포용 exe)  # pillow: t
 # 설치 뒤 `pip uninstall -y onnxruntime onnxruntime-gpu` 후 `pip install "onnxruntime-gpu[cuda,cudnn]"`로 GPU판만 남긴다.
 # (faster-whisper는 `pip install --no-deps faster-whisper ctranslate2` + `pip install huggingface_hub tokenizers`로 깔면 처음부터 안전)
 # ctranslate2(음성 인식)는 CUDA 12 cuBLAS를 쓴다 → nvidia-cublas-cu12 (CUDA 툴킷 설치 없이)
-# rtmlib(몸매 보정의 몸의 점)도 CPU용 onnxruntime·opencv-contrib를 같이 깐다 → `pip install --no-deps rtmlib`
-ai = ["insightface>=2.0", "onnxruntime-gpu[cuda,cudnn]", "opencv-python", "faster-whisper>=1.2", "ctranslate2>=4.8", "nvidia-cublas-cu12>=12.8",
-      "rtmlib>=0.0.16"]
+# rtmlib(몸매 보정의 몸의 점)도 CPU용 onnxruntime·opencv-contrib를 같이 깐다 → 설치 뒤 opencv-contrib를 지우고 opencv-python만
+# 맥(Apple Silicon): onnxruntime 기본판(Core ML 포함)과 mlx-whisper(음성 인식, GPU) — NVIDIA 패키지는 깔지 않는다 (README 참고)
+ai = [
+    "insightface>=2.0", "opencv-python", "rtmlib>=0.0.16",
+    "onnxruntime-gpu[cuda,cudnn]; sys_platform != 'darwin'",
+    "faster-whisper>=1.2; sys_platform != 'darwin'", "ctranslate2>=4.8; sys_platform != 'darwin'",
+    "nvidia-cublas-cu12>=12.8; sys_platform != 'darwin'",
+    "onnxruntime; sys_platform == 'darwin'",
+    "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "huggingface_hub", "scipy",
+]
 
 [project.gui-scripts]
 ks-studio = "ks_studio.app.application:main"

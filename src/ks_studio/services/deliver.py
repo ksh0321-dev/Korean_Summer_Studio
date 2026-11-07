@@ -20,9 +20,11 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from ks_studio.core.subtitles import Subtitles
-from ks_studio.services.captions import CaptionBurner
+from ks_studio.services.audio_post import AudioPost
+from ks_studio.services.captions import CaptionBurner, OverlayBurner
 from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
+from ks_studio.services.accel import hardware_encoders
 from ks_studio.services.optimize import Cancelled, Plan, add_video_stream, inspect, make_optimized
 from ks_studio.services.render import TimelineRenderer, canvas_size
 from ks_studio.services.sources import AUDIO_RATE, SourceCache
@@ -37,6 +39,15 @@ RATIOS = {  # 칸 값 → (이름, 가로:세로 또는 None = 원본 비율)
     "16:9": ("16:9 가로 (유튜브)", (16, 9)),
 }
 FITS = {"crop": "가운데 자르기 (화면 꽉 차게)", "pad": "검은 여백 (자르지 않게)"}
+# 내보내기 프리셋: 고르면 비율·맞추기·해상도·형식·소리 크기 맞추기를 한 번에 (고른 뒤 하나씩 바꿀 수도 있다)
+PRESETS = {
+    "shorts": ("쇼츠 · 릴스 · 틱톡 (9:16 · 1080p)", ("9:16", "crop", 1080, "h264", True)),
+    "feed": ("인스타 피드 (4:5 · 1080p)", ("4:5", "crop", 1080, "h264", True)),
+    "square": ("정사각형 (1:1 · 1080p)", ("1:1", "crop", 1080, "h264", True)),
+    "youtube": ("유튜브 (16:9 · 1080p)", ("16:9", "pad", 1080, "h264", True)),
+    "youtube4k": ("유튜브 4K (16:9 · 2160p · H.265)", ("16:9", "pad", 2160, "hevc", True)),
+    "original": ("원본 그대로 (편집·보관용)", ("original", "crop", 0, "h264", False)),
+}
 RESOLUTIONS = {1080: "1080p", 720: "720p", 1440: "1440p", 2160: "2160p (4K)", 0: "원본 그대로"}  # 짧은 변
 CODECS = {"h264": "MP4 · H.264 (어디서나 재생)", "hevc": "MP4 · H.265 (같은 화질에 더 작은 파일)"}
 PREVIEW_SHORT = 800  # 저해상도 미리보기의 짧은 변
@@ -44,15 +55,18 @@ PREVIEW_SHORT = 800  # 저해상도 미리보기의 짧은 변
 ENCODERS = {
     "h264": (
         ("h264_nvenc", {"preset": "p6", "rc": "vbr", "cq": "19", "b": "0", "maxrate": "60M", "bufsize": "120M"}),
+        *hardware_encoders("h264", "30M"),
         ("libx264", {"preset": "medium", "crf": "18"}),
     ),
     "hevc": (
         ("hevc_nvenc", {"preset": "p6", "rc": "vbr", "cq": "22", "b": "0", "maxrate": "50M", "bufsize": "100M"}),
+        *hardware_encoders("hevc", "20M"),
         ("libx265", {"preset": "fast", "crf": "22"}),
     ),
 }
 PREVIEW_ENCODERS = (
     ("h264_nvenc", {"preset": "p1", "rc": "vbr", "cq": "28", "b": "0", "maxrate": "20M", "bufsize": "40M", "bf": "0"}),
+    *hardware_encoders("h264", "6M"),
     ("libx264", {"preset": "ultrafast", "crf": "28"}),
 )
 
@@ -63,6 +77,8 @@ class OutputFormat:
     fit: str = "crop"
     short: int = 1080  # 짧은 변 px (0 = 원본 그대로)
     codec: str = "h264"
+    loudness: bool = False  # 소리 크기 맞추기 (유튜브 기준 -14 LUFS) — 컷편집 타임라인 내보내기에서
+    denoise: bool = False  # 잡음 줄이기 (바람·웅웅 소리)
 
     @property
     def tag(self) -> str:
@@ -148,7 +164,10 @@ def export_timeline(project: Project, workspace: Workspace, sources: SourceCache
     scale = min(1.0, pick(size[0] / canvas[0], size[1] / canvas[1]))
     drawn = (_even(canvas[0] * scale), _even(canvas[1] * scale))
     renderer = TimelineRenderer(project, workspace, sources, drawn, "yuv420p")
-    burner = CaptionBurner(project.subtitles, size, fps) if with_subtitles and project.subtitles.cues else None
+    subs = project.subtitles if with_subtitles and project.subtitles.cues else None
+    burner = OverlayBurner(subs, project.texts, size, fps) if subs is not None or project.texts else None  # 글자 + 자막
+    post = AudioPost(fmt.denoise, fmt.loudness) if fmt.loudness or fmt.denoise else None
+    written = [0]  # 인코더에 넘긴 소리 샘플 수 (다듬은 소리는 늦게·다른 크기로 나온다)
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(output.name + ".part")
     try:
@@ -175,6 +194,12 @@ def export_timeline(project: Project, workspace: Workspace, sources: SourceCache
                     frame.pts, frame.time_base = pts, Fraction(1, fps)
                     dst.mux(video.encode(frame))
 
+            def encode_audio(samples: np.ndarray) -> None:
+                chunk = av.AudioFrame.from_ndarray(np.ascontiguousarray(samples.reshape(1, -1), np.float32), format="flt", layout="mono")
+                chunk.sample_rate, chunk.pts, chunk.time_base = AUDIO_RATE, written[0], Fraction(1, AUDIO_RATE)
+                written[0] += len(samples)
+                dst.mux(audio.encode(chunk))
+
             total = max(1, project.duration)
             for t, frame, samples in renderer.frames(0):
                 if cancel is not None and cancel.is_set():
@@ -182,13 +207,14 @@ def export_timeline(project: Project, workspace: Workspace, sources: SourceCache
                 frame.pts, frame.time_base = t, Fraction(1, fps)
                 graph.push(frame)
                 drain()
-                chunk = av.AudioFrame.from_ndarray(np.ascontiguousarray(samples.reshape(1, -1)), format="flt", layout="mono")
-                chunk.sample_rate, chunk.pts, chunk.time_base = AUDIO_RATE, t * renderer.samples_per_frame, Fraction(1, AUDIO_RATE)
-                dst.mux(audio.encode(chunk))
+                for part in (post.push(samples) if post is not None else [samples]):
+                    encode_audio(part)
                 if on_progress and t % 15 == 0:
                     on_progress(min(1.0, t / total))
             graph.push(None)
             drain()
+            for part in (post.flush() if post is not None else []):
+                encode_audio(part)
             dst.mux(video.encode(None))
             dst.mux(audio.encode(None))
     except BaseException:

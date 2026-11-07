@@ -89,8 +89,18 @@ def _inpaint():
 
 
 def _speech():
-    import ctranslate2
     import numpy as np
+
+    from ks_studio.services.speech import speech_model_ready, use_mlx
+
+    if use_mlx():  # 맥: mlx-whisper (Apple Silicon GPU)
+        if not speech_model_ready():
+            return "mlx-whisper · 모델 없음 (처음 쓸 때 내려받음)"
+        from ks_studio.services.speech import MODEL_DIR, MlxWhisper
+
+        MlxWhisper(MODEL_DIR).transcribe(np.zeros(16000, np.float32))
+        return "mlx-whisper (Apple Silicon GPU)"
+    import ctranslate2
 
     devices = ctranslate2.get_cuda_device_count()
     from ks_studio.services.speech import MODEL, MODEL_DIR

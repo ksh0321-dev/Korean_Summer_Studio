@@ -28,6 +28,8 @@ LEGS_MAX = 0.10  # 강도 100%: 엉덩이 아래가 10% 길어진다
 HEAD_REACH = 2.0  # 머리카락은 얼굴 점이 닿는 거리의 2배 안쪽까지만 머리로 친다
 HEAD_FADE = 1.6  # 머리 바깥 고리: 머리 반지름의 1.6배에서 변형이 0
 BODY_EFFECTS = ("waist", "shoulders", "legs")
+BG_BLUR_MAX = 0.025  # 배경 흐림 100%: 흐림 반경(가우시안 시그마) = 화면 짧은 변의 2.5%
+BG_BLUR_SCALE = 0.25  # 흐림은 1/4 크기에서 (흐린 그림이라 차이가 없고 16배 빠르다)
 PERSON = tuple(i for i in range(6) if i != BACKGROUND)  # 사람 층 = 배경 아닌 것 전부 (머리카락·피부·옷·기타)
 SMOOTH = 0.6  # 몸의 점 떨림 줄이기: 새 값 60% + 이전 40%
 HEAD_MARGIN = 0.35  # 머리 둘레 다시 분리: 머리 상자를 사방으로 35% 넓혀서
@@ -43,7 +45,32 @@ class BodyInfo:
 
 
 def needs_body(settings) -> bool:
-    return any(getattr(settings, name) > 0 for name in (*BODY_EFFECTS, "face_small"))
+    return any(getattr(settings, name) > 0 for name in (*BODY_EFFECTS, "face_small", "bg_blur"))
+
+
+def blur_background(image: np.ndarray, body: BodyInfo, strength: float) -> bool:
+    """제자리에서 사람(보정할 사람 — analyze_body가 얼굴 자리로 골라 둔) 말고 다 흐리게. 바뀐 게 있으면 True.
+
+    사람을 빼고 흐린다 (흐린 배경 ÷ 흐린 배경 가리개): 그냥 흐리면 사람 색이 배경으로 번져 몸 둘레에 후광이 생긴다.
+    """
+    if strength <= 0:
+        return False
+    h, w = image.shape[:2]
+    ch, cw = h // GRID + 1, w // GRID + 1
+    person = cv2.resize(_person_layer(body, cw, ch), (w, h), interpolation=cv2.INTER_LINEAR)
+    if person.max() <= 0:  # 사람이 없는 장면은 그대로 (화면 전체가 흐려지면 이상하다)
+        return False
+    sw, sh = max(8, round(w * BG_BLUR_SCALE)), max(8, round(h * BG_BLUR_SCALE))
+    sigma = max(0.5, min(w, h) * BG_BLUR_MAX * min(1.0, strength) * BG_BLUR_SCALE)
+    background = 1 - cv2.resize(person, (sw, sh), interpolation=cv2.INTER_AREA)
+    small = cv2.resize(image, (sw, sh), interpolation=cv2.INTER_AREA).astype(np.float32)
+    blurred = cv2.GaussianBlur(small * background[..., None], (0, 0), sigma)
+    weight = cv2.GaussianBlur(background, (0, 0), sigma)
+    blurred = blurred / np.maximum(weight, 1e-3)[..., None]
+    blurred = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR)
+    keep = person[..., None]
+    image[:] = np.clip(image * keep + blurred * (1 - keep) + 0.5, 0, 255).astype(np.uint8)
+    return True
 
 
 def analyze_body(small_rgb: np.ndarray, width: int, height: int, near=None, analyzer: BodyAnalyzer | None = None,

@@ -161,3 +161,32 @@ def test_only_target_person_is_reshaped():
     assert reshape(out, None, {"legs": 1.0}, BodyInfo(alone, keypoints()))
     assert (out[:, :260] == image[:, :260]).all()  # 다른 사람은 그대로
     assert (out[600:, 380:620] != image[600:, 380:620]).any()  # 보정할 사람은 바뀐다
+
+
+def test_blur_background_keeps_person_and_blurs_rest():
+    import numpy as np
+
+    from ks_studio.core.beauty import BeautySettings
+    from ks_studio.services.beautify import apply
+    from ks_studio.services.body import BACKGROUND, CLOTHES, PARTS_SIZE
+    from ks_studio.services.reshape import BodyInfo, blur_background, needs_body
+
+    h, w = 240, 320
+    rng = np.random.default_rng(0)
+    image = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)  # 잡음 배경 (흐리면 고르게 된다)
+    parts = np.zeros((PARTS_SIZE, PARTS_SIZE, 6), np.float16)
+    parts[..., BACKGROUND] = 1
+    parts[64:192, 96:160, BACKGROUND] = 0  # 가운데 사람
+    parts[64:192, 96:160, CLOTHES] = 1
+    body = BodyInfo(parts, None)
+    out = image.copy()
+    assert blur_background(out, body, 1.0)
+    person = (slice(80, 160), slice(130, 190))
+    assert np.array_equal(out[person], image[person])  # 사람 속은 그대로
+    assert out[:40, :60].std() < image[:40, :60].std() * 0.5  # 배경은 흐려졌다
+    assert not blur_background(image.copy(), body, 0.0)
+    empty = BodyInfo(np.eye(6, dtype=np.float16)[np.zeros((PARTS_SIZE, PARTS_SIZE), int)], None)  # 사람 없음
+    assert not blur_background(image.copy(), empty, 1.0)
+    settings = BeautySettings(bg_blur=1.0)
+    assert needs_body(settings) and not settings.is_identity
+    assert apply(image, None, settings, body=body) is not image

@@ -112,3 +112,35 @@ def test_export_timeline_burns_captions_and_keeps_sound(tmp_path):
     with av.open(str(plain)) as c:
         last = [f.to_ndarray(format="rgb24").astype(int) for f in c.decode(video=0)][25]
     assert np.abs(frames[0][bottom] - last[bottom]).max() < 30  # 자막 끄면 그대로
+
+
+def test_presets_use_known_values():
+    from ks_studio.services.deliver import CODECS, FITS, PRESETS, RATIOS, RESOLUTIONS
+
+    for _label, (ratio, fit, short, codec, loudness) in PRESETS.values():
+        assert ratio in RATIOS and fit in FITS and short in RESOLUTIONS and codec in CODECS
+        assert isinstance(loudness, bool)
+
+
+def test_export_timeline_burns_texts_and_levels_loudness(tmp_path):
+    from ks_studio.core.project import Clip, Project, TextItem
+    from ks_studio.core.workspace import Workspace
+    from ks_studio.services.audio_post import loudness_of
+    from ks_studio.services.deliver import export_timeline
+    from ks_studio.services.sources import SourceCache
+
+    make_wide(tmp_path / "wide.mp4", seconds=3.0)
+    project = Project(fps=30, clips=(Clip("wide.mp4", 0, 90, volume_db=-18.0),),
+                      texts=(TextItem(1.0, 2.0, "TITLE", x=0.5, y=0.2),))
+    out = tmp_path / "texts.mp4"
+    fmt = OutputFormat("1:1", "crop", short=180, loudness=True, denoise=True)
+    export_timeline(project, Workspace(tmp_path), SourceCache(), out, fmt)
+    with av.open(str(out)) as c:
+        frames = [f.to_ndarray(format="rgb24").astype(int) for f in c.decode(video=0)]
+    with av.open(str(out)) as c:
+        audio = np.concatenate([f.to_ndarray().mean(axis=0) for f in c.decode(audio=0)]).astype(np.float32)
+    top = slice(10, 70)
+    assert np.abs(frames[45][top] - frames[10][top]).max() > 100  # 1~2초에만 글자
+    assert np.abs(frames[75][top] - frames[10][top]).max() < 30
+    assert len(audio) > 2.5 * AUDIO_RATE
+    assert -17 < loudness_of(audio) < -11  # -18dB로 줄인 소리를 -14 LUFS 쪽으로

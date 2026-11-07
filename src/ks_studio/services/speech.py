@@ -33,13 +33,27 @@ SPEECH_MODEL_MB = 3100  # 내려받는 크기 (안내·진행률용)
 SAMPLE_RATE = 16_000
 
 
+MLX_REPO = "mlx-community/whisper-large-v3-mlx"  # 맥(Apple Silicon) GPU용 — 같은 large-v3, MLX 형식
+
+
+def use_mlx() -> bool:
+    """맥에서 mlx-whisper가 깔려 있으면 그걸로 (Apple Silicon GPU). faster-whisper는 맥에서 CPU로만 돌아 몇 배 느리다."""
+    import importlib.util
+    import sys
+
+    return sys.platform == "darwin" and importlib.util.find_spec("mlx_whisper") is not None
+
+
 def _repo(folder: Path) -> Path:
+    if use_mlx():
+        return folder / f"models--{MLX_REPO.replace('/', '--')}"
     return folder / f"models--Systran--faster-whisper-{MODEL}"
 
 
 def speech_model_ready(folder: Path = MODEL_DIR) -> bool:
-    """모델 본체(model.bin)까지 받았나 — 폴더만 보면 받다 끊긴 것도 '있음'이 된다."""
-    return any(f.stat().st_size > 0 for f in _repo(folder).glob("snapshots/*/model.bin"))
+    """모델 본체까지 받았나 — 폴더만 보면 받다 끊긴 것도 '있음'이 된다."""
+    body = "weights.*" if use_mlx() else "model.bin"
+    return any(f.stat().st_size > 0 for f in _repo(folder).glob(f"snapshots/*/{body}"))
 
 
 def download_speech_model(on_progress=None, folder: Path = MODEL_DIR) -> None:
@@ -48,7 +62,8 @@ def download_speech_model(on_progress=None, folder: Path = MODEL_DIR) -> None:
     받는 쪽(huggingface_hub)이 진행률을 알려 주지 않아서, 받는 폴더 크기를 0.5초마다 재서 알린다.
     """
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-    from faster_whisper.utils import download_model
+    if not use_mlx():
+        from faster_whisper.utils import download_model
 
     stop = threading.Event()
 
@@ -66,7 +81,12 @@ def download_speech_model(on_progress=None, folder: Path = MODEL_DIR) -> None:
     if watcher:
         watcher.start()
     try:
-        download_model(MODEL, cache_dir=str(folder))
+        if use_mlx():
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(MLX_REPO, cache_dir=str(folder))
+        else:
+            download_model(MODEL, cache_dir=str(folder))
     finally:
         stop.set()
     if on_progress:
@@ -74,6 +94,8 @@ def download_speech_model(on_progress=None, folder: Path = MODEL_DIR) -> None:
 
 
 def speech_unavailable_reason() -> str | None:
+    if use_mlx():
+        return None
     try:
         import faster_whisper  # noqa: F401
     except ImportError as e:
@@ -128,6 +150,44 @@ def cues_from_segments(segments, duration: float, line_chars: int = 16, max_line
     return split_words(segment_words(segments, duration), line_chars, max_lines)
 
 
+class _Word:
+    def __init__(self, start: float, end: float, word: str) -> None:
+        self.start, self.end, self.word = start, end, word
+
+
+class _Segment:
+    def __init__(self, data: dict) -> None:
+        self.start, self.end, self.text = float(data["start"]), float(data["end"]), str(data.get("text", ""))
+        self.words = [_Word(float(w["start"]), float(w["end"]), str(w["word"])) for w in data.get("words", ())]
+
+
+class _Info:
+    def __init__(self, language: str | None) -> None:
+        self.language = language
+
+
+class MlxWhisper:
+    """mlx-whisper를 faster-whisper WhisperModel처럼 (transcribe → (구간들, info)) — 맥 Apple Silicon GPU.
+
+    mlx-whisper에는 말소리 구간 찾기(VAD)·hotwords가 없다: 힌트는 initial_prompt로 주고, 음악 구간의 지어낸 말은
+    segment_words가 거르는 반복 걸러내기에 맡긴다.
+    """
+
+    def __init__(self, folder: Path) -> None:
+        from huggingface_hub import snapshot_download
+
+        self._path = snapshot_download(MLX_REPO, cache_dir=str(folder))
+
+    def transcribe(self, audio, task: str = "transcribe", language: str | None = None, hotwords: str | None = None,
+                   word_timestamps: bool = False, **_ignored):
+        import mlx_whisper
+
+        result = mlx_whisper.transcribe(audio, path_or_hf_repo=self._path, task=task, language=language,
+                                        initial_prompt=hotwords, word_timestamps=word_timestamps,
+                                        condition_on_previous_text=False)
+        return [_Segment(s) for s in result.get("segments", ())], _Info(result.get("language"))
+
+
 def translate_span(model, audio: np.ndarray, start: float, end: float, language: str | None, hint: str | None = None) -> str:
     """audio의 [start, end] 구간만 영어로 (두 줄 자막의 둘째 줄).
 
@@ -168,10 +228,13 @@ class SpeechWorker(QObject):
     def _load(self, path: Path):
         if self._model is None:
             os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows 심볼릭 링크 경고 (동작엔 상관없음)
-            from faster_whisper import WhisperModel
-
             done = speech_model_ready()
             self.status.emit(path, "음성 인식 모델 여는 중…" if done else "음성 인식 모델 내려받는 중 (처음 한 번, 약 3GB)…")
+            if use_mlx():  # 맥: Apple Silicon GPU
+                self._model = MlxWhisper(MODEL_DIR)
+                return self._model
+            from faster_whisper import WhisperModel
+
             try:
                 self._model = WhisperModel(MODEL, device="cuda", compute_type="float16", download_root=str(MODEL_DIR))
             except Exception as e:  # NVIDIA GPU가 없거나 CUDA를 못 쓰면

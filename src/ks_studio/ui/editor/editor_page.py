@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
@@ -30,11 +30,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QFileDialog,
+    QScrollArea,
     QTabWidget,
 )
 
 from ks_studio.core.edits import (
     add_media,
+    add_sound,
+    detach_audio,
+    set_sounds,
+    set_texts,
     clips_using,
     delete_clips,
     delete_range,
@@ -58,6 +63,7 @@ from ks_studio.core.edits import (
     toggle_transition,
     trim_to,
 )
+from ks_studio.core.backups import make_backup
 from ks_studio.core.history import History
 from ks_studio.core.project import MAIN_TRACK, TIMELINE_FPS_CHOICES, Clip, Project, timeline_fps_for
 from ks_studio.core.settings import MEDIA_COPY, AppSettings
@@ -70,6 +76,8 @@ from ks_studio.services.sources import SourceCache, optimized_path, probe
 from ks_studio.core.subtitles import to_srt
 from ks_studio.services.render import TimelineRenderer
 from ks_studio.ui.editor.caption_panel import CaptionPanel
+from ks_studio.ui.editor.sound_panel import AUDIO_FILTER, SoundPanel
+from ks_studio.ui.editor.text_panel import TextPanel
 from ks_studio.ui.editor.export_dialog import ExportDialog
 from ks_studio.ui.settings.shortcuts import shortcut_name
 from ks_studio.ui.editor.inspector import Inspector
@@ -217,6 +225,8 @@ class EditorPage(QWidget):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.addWidget(self.view, 1)
         center_layout.addLayout(transport)
+        self._center_layout = center_layout  # 전체 화면 미리보기에서 돌아올 자리
+        self._fullscreen_keys: list = []
 
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
@@ -236,9 +246,32 @@ class EditorPage(QWidget):
         self.view.caption_moved.connect(self._on_caption_moved)
         self.timeline.caption_clicked.connect(self._on_caption_clicked)
         self._speech = None  # 음성 인식 (처음 쓸 때 연다)
+        self.texts = TextPanel()
+        self.texts.edited.connect(lambda texts: self._apply(set_texts(self.project, texts)))
+        self.texts.seek_requested.connect(lambda seconds: self.player.seek(round(seconds * self.project.fps)))
+        self.view.text_moved.connect(self.texts.move_text)
+        self.sounds = SoundPanel()
+        self.sounds.edited.connect(lambda sounds: self._apply(set_sounds(self.project, sounds)))
+        self.sounds.add_requested.connect(self._add_music)
+        self.sounds.seek_requested.connect(self.player.seek)
+        self.timeline.sound_clicked.connect(self._on_sound_clicked)
+        self.timeline.text_clicked.connect(self._on_text_clicked)
+        self.texts.notice.connect(lambda text: self.message.emit(text, WARNING if text.startswith("⚠") else INFO))
+        self.inspector.props_changed.connect(self._change_clip_props)
+        self.inspector.lut_requested.connect(self._choose_lut)
+        self.inspector.detach_requested.connect(self._detach_audio)
+        inspector_scroll = QScrollArea()  # 속성이 많아져 길다
+        inspector_scroll.setWidgetResizable(True)
+        inspector_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inspector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inspector_scroll.setWidget(self.inspector)
+        # 세로로만 넘긴다: 오른쪽 칸이 속성 창 최소 폭보다 좁아지지 않게 (좁아지면 칸이 잘렸다)
+        inspector_scroll.setMinimumWidth(self.inspector.minimumSizeHint().width() + inspector_scroll.verticalScrollBar().sizeHint().width())
         self.right_tabs = QTabWidget()
-        self.right_tabs.addTab(self.inspector, "속성")
+        self.right_tabs.addTab(inspector_scroll, "속성")
         self.right_tabs.addTab(self.captions, "자막")
+        self.right_tabs.addTab(self.texts, "글자")
+        self.right_tabs.addTab(self.sounds, "소리")
         layout.addWidget(stage_layout(left=self.bin, center=center, right=self.right_tabs, bottom=bottom))
         self._refresh()
 
@@ -309,6 +342,8 @@ class EditorPage(QWidget):
         zoom_out = a("－", "축소", lambda: self.timeline.zoom(1 / 1.25), ("-",))
         zoom_in = a("＋", "확대", lambda: self.timeline.zoom(1.25), ("=",))
         fit = a("⤢ 맞춤", "타임라인 전체를 화면에 맞추기", self.timeline.fit, ("\\",))
+        thumbnail = a("📷 화면 저장", "지금 화면을 결과물 크기 그대로 사진으로 (글자·자막 포함) — 썸네일용", self._save_thumbnail, ("Ctrl+Shift+S",))
+        fullscreen = a("⛶ 전체 화면", "미리보기를 전체 화면으로 (Esc로 돌아오기)", self._toggle_fullscreen, ("F11",))
         # 버튼 없이 단축키만
         a("재생/정지", "재생/정지", self.player.toggle, ("Space",))
         a("1프레임 뒤로", "1프레임 뒤로", lambda: self.player.step(-1), ("Left",))
@@ -325,6 +360,7 @@ class EditorPage(QWidget):
             [dissolve, marker],
             [prev_cut, next_cut],
             None,  # 나머지는 오른쪽으로
+            [thumbnail, fullscreen],
             [snap, self.link_action],
             [zoom_out, zoom_in, fit],
         ]
@@ -382,6 +418,16 @@ class EditorPage(QWidget):
         if self._dirty and self._workspace is not None:
             self.project.save(self._workspace.project_file)
             self._dirty = False
+            try:
+                make_backup(self._workspace.project_file)  # 5분에 한 번만 남는다
+            except OSError:
+                log.exception("백업 실패")
+
+    def restore(self, project: Project) -> None:
+        """백업에서 되살리기: 한 번의 편집처럼 (Ctrl+Z로 되돌릴 수 있다)."""
+        if self._history.push(project):  # 연동(follow_main) 없이 통째로
+            self._changed()
+        self.message.emit("백업에서 되살렸습니다 — 되돌리려면 Ctrl+Z", INFO)
 
     # ── 편집 ────────────────────────────────────────────────────
 
@@ -411,6 +457,8 @@ class EditorPage(QWidget):
             self.timeline.set_project(self.project, self._workspace, fit=fit)
             self.player.set_project(self.project, self._workspace)
         self.captions.set_subtitles(self.project.subtitles)
+        self.texts.set_texts(self.project.texts)
+        self.sounds.set_sounds(self.project.sounds, self.project.fps)
         self._show_caption(self.player.position)
         self.export_button.setEnabled(self.project.duration > 0)
         self.fps_combo.blockSignals(True)
@@ -508,6 +556,118 @@ class EditorPage(QWidget):
         self._apply(edited)
         added = self.project.find(clip_id).clip.transition_ms > 0
         self.message.emit(f"디졸브 {'넣음' if added else '뺌'} ({DISSOLVE_MS}ms, 겹친 만큼 전체가 짧아짐)" if added else "디졸브를 뺐습니다", INFO)
+
+    def _change_clip_props(self, changes: dict) -> None:
+        """속성 창의 속도·자르기·회전·뒤집기·색·필터·LUT → 선택한 클립 전부."""
+        ids = self.timeline.selection or ({self.timeline.selected} if self.timeline.selected else set())
+        if not ids:
+            return
+        edited = set_clip_props(self.project, ids, **changes)
+        if edited is self.project and "speed" in changes:
+            self.message.emit("속도를 바꿀 수 없습니다: 위 줄에서 옆 클립과 겹치거나, 소리를 떼어 낸 클립입니다", WARNING)
+            self._show_selected()
+            return
+        self._apply(edited)
+
+    def _choose_lut(self) -> None:
+        """.cube LUT 파일을 골라 프로젝트 luts/ 폴더로 복사하고 선택한 클립에 (폴더째 옮겨도 맞게)."""
+        if self._workspace is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "LUT 불러오기", "", "LUT (*.cube)")
+        if not path:
+            return
+        source = Path(path)
+        if self._workspace.to_source(source) == str(source.resolve()):  # 프로젝트 밖 → 복사
+            dest = self._workspace.root / "luts" / source.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            source = dest
+        self._change_clip_props({"lut": self._workspace.to_source(source)})
+
+    def _detach_audio(self) -> None:
+        if self.timeline.selected is None:
+            return
+        edited = detach_audio(self.project, self.timeline.selected)
+        if edited is self.project:
+            self.message.emit("소리를 뗄 수 없습니다 (이미 뗐거나 속도를 바꾼 클립)", WARNING)
+            return
+        self._apply(edited)
+        self.right_tabs.setCurrentWidget(self.sounds)
+        self.message.emit("소리를 '소리' 띠로 떼어 냈습니다 — 화면과 따로 옮기고 자를 수 있습니다", INFO)
+
+    def _on_text_clicked(self, text_id: str) -> None:
+        self.right_tabs.setCurrentWidget(self.texts)
+        self.texts.select(text_id)
+
+    def _on_sound_clicked(self, sound_id: str) -> None:
+        self.right_tabs.setCurrentWidget(self.sounds)
+        self.sounds.select(sound_id)
+
+    def _add_music(self) -> None:
+        """배경 음악 파일을 재생 헤드 자리에 (프로젝트 밖이면 설정대로 media/로 복사)."""
+        if self._workspace is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "음악 넣기", "", AUDIO_FILTER)
+        if not path:
+            return
+        source = Path(path)
+        try:
+            import av
+
+            with av.open(str(source)) as container:
+                if not container.streams.audio:
+                    raise ValueError("소리가 없는 파일")
+                length_ms = round((container.duration or 0) / 1000)
+        except (OSError, ValueError, av.FFmpegError) as e:
+            QMessageBox.warning(self, "넣을 수 없음", f"소리를 읽을 수 없습니다:\n{source}\n({e})")
+            return
+        outside = self._workspace.to_source(source) == str(source.resolve())
+        if outside and self._settings.media_import == MEDIA_COPY:
+            dest = _unique_path(self._workspace.media_dir, source.name)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            source = dest
+        self._apply(add_sound(self.project, self._workspace.to_source(source), self.player.position, max(1000, length_ms)))
+        self.right_tabs.setCurrentWidget(self.sounds)
+
+    def _save_thumbnail(self) -> None:
+        """지금 화면을 결과물 크기 그대로 (글자·자막까지) 사진으로 — 유튜브 썸네일 등."""
+        if self._workspace is None or self.project.duration == 0:
+            return
+        from ks_studio.services.still import save_still, timeline_still
+
+        frame = self.player.position
+        name = f"{self._workspace.root.name}_{frame / self.project.fps:06.2f}s.jpg".replace(":", "")
+        default = self._workspace.exports_dir / "thumbnails" / name
+        path, _ = QFileDialog.getSaveFileName(self, "지금 화면 저장", str(default), "사진 (*.jpg *.png)")
+        if not path:
+            return
+        try:
+            save_still(timeline_still(self.project, self._workspace, self._sources, frame), Path(path))
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, "저장하지 못함", str(e))
+            return
+        self.message.emit(f"지금 화면을 저장했습니다: {Path(path).name}", INFO)
+
+    def _toggle_fullscreen(self) -> None:
+        """미리보기를 전체 화면으로 (Esc·F11·두 번 클릭으로 돌아온다). 재생·멈춤은 스페이스."""
+        if self.view.parent() is None:  # 전체 화면 → 원래 자리로
+            for shortcut in self._fullscreen_keys:
+                shortcut.setParent(None)
+                shortcut.deleteLater()
+            self._fullscreen_keys = []
+            self.view.showNormal()
+            self._center_layout.insertWidget(0, self.view, 1)
+            self.view.show()
+            return
+        self._center_layout.removeWidget(self.view)
+        self.view.setParent(None)
+        # 전체 화면 창에선 편집 화면의 단축키가 닿지 않는다 → 그 창에만 잠깐 (돌아오면 지운다 — 안 그러면 스페이스가 겹친다)
+        self._fullscreen_keys = [QShortcut(QKeySequence(key), self.view, activated=slot)
+                                 for key, slot in (("Escape", self._toggle_fullscreen), ("F11", self._toggle_fullscreen),
+                                                   ("Space", self.player.toggle))]
+        self.view.showFullScreen()
+        self.view.activateWindow()
 
     def _change_clip_prop(self, name: str, value: float) -> None:
         """속성 창의 볼륨·페이드·화면·디졸브 → 선택한 클립 전부."""
@@ -641,7 +801,17 @@ class EditorPage(QWidget):
         if self._workspace is None:
             return
         rejected = []
+        from ks_studio.services.still import image_to_video, is_image
+
         for path in paths:
+            if is_image(path):  # 사진 → 5초짜리 영상 (나머지는 영상과 똑같이 다룬다)
+                try:
+                    video = image_to_video(path, _unique_path(self._workspace.media_dir, path.stem + ".mp4"))
+                except (OSError, ValueError) as e:
+                    rejected.append(f"{path.name} ({e})")
+                    continue
+                self._apply(add_media(self.project, self._workspace.to_source(video)))
+                continue
             if probe(path) is None:
                 rejected.append(path.name)
                 continue
@@ -827,7 +997,8 @@ class EditorPage(QWidget):
             return False
         if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             target = self._screen_target()
-            if target is not None and not self.view.caption_hit(event.position()):  # 자막 위면 자막 끌기 (VideoView가 한다)
+            on_overlay = self.view.caption_hit(event.position()) or self.view.text_hit(event.position()) is not None
+            if target is not None and not on_overlay:  # 자막·글자 위면 그것을 끈다 (VideoView가 한다)
                 self.player.pause()
                 clip = target.clip
                 self._view_drag = {"id": clip.id, "start": event.position(), "pos": (clip.pos_x, clip.pos_y), "draft": None}
@@ -862,7 +1033,10 @@ class EditorPage(QWidget):
         index = subs.at(seconds)
         cue = subs.cues[index] if index is not None else None
         self.view.set_caption(cue.text if cue else "", subs.style, cue.translation if cue else "")
+        self.view.set_texts([(t.id, t.text, t.style, t.x, t.y, t.opacity_at(seconds))
+                             for t in self.project.texts if t.start <= seconds < t.end])
         self.captions.set_time(seconds)
+        self.texts.set_time(seconds)
 
     # ── 자막 ────────────────────────────────────────────────────
 

@@ -69,6 +69,7 @@ EFFECT_TABS = (  # (탭, ((BeautySettings 칸, 이름), ...)) — 턱 길이만 
         ("face_small", "얼굴 작게 [Beta]"),  # 사람 분리 모델로 머리째 줄이고 드러난 배경만 메꾼다 (몸 모델 필요)
     )),
     ("몸매 [Beta]", (("waist", "허리 잘록"), ("shoulders", "어깨 좁게"), ("legs", "다리 길게"))),  # 몸의 점(RTMPose) + 사람 분리
+    ("배경", (("bg_blur", "배경 흐림 (인물 모드)"),)),  # 사람 분리 모델 (몸 모델과 같은 것)
     ("메이크업", (
         ("blush", "블러셔"), ("contour", "윤곽 (쉐딩·하이라이트)"), ("eyeshadow", "아이섀도"),
         ("lip", "립 컬러"), ("lip_gloss", "립 광택"), ("teeth", "치아 미백"), ("eye_clear", "눈 또렷하게"),
@@ -378,7 +379,7 @@ class BeautifyPage(QWidget):
 
         self.model_buttons = {
             "face": ModelButton("얼굴", FACE_MODEL_MB, face_models_ready, download_face_models, "AI 보정 전체 (얼굴 찾기·랜드마크)"),
-            "body": ModelButton("몸매", BODY_MODEL_MB, body_models_ready, download_body_models, "몸매 보정·얼굴 작게"),
+            "body": ModelButton("몸매", BODY_MODEL_MB, body_models_ready, download_body_models, "몸매 보정·얼굴 작게·배경 흐림"),
             "speech": ModelButton("자막", SPEECH_MODEL_MB, speech_model_ready, download_speech_model,
                                   "컷편집의 음성으로 자막 만들기 (안 받아 두면 처음 만들 때 받는다)"),
         }

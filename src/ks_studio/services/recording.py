@@ -26,6 +26,8 @@ from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat, QVideoSink
 from ks_studio.core.cfr import FrameSlotter
 from ks_studio.services.capture import MicInput
 from ks_studio.services.media import AUDIO_DELAY_TAG
+from ks_studio.services.accel import hardware_encoders
+from ks_studio.services.optimize import video_encoder
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +140,11 @@ def _write_mkv(q, path, fps, size, mic_origin, sample_rate, channels, audio_dela
     try:
         average, peak = (round(mbps * fps / 30) for mbps in VIDEO_MBPS_AT_30FPS)
         options = {**VIDEO_OPTIONS, "b": f"{average}M", "maxrate": f"{peak}M", "g": str(fps)}
-        video = container.add_stream("h264_nvenc", rate=fps, options=options)
+        # NVIDIA(NVENC) → 맥(VideoToolbox) → CPU(libx264) 중 되는 것 (NVIDIA가 없는 PC·맥에서도 돈다)
+        candidates = (("h264_nvenc", options), *hardware_encoders("h264", f"{average}M"),
+                      ("libx264", {"preset": "veryfast", "crf": "18", "g": str(fps)}))
+        name, chosen = video_encoder(size, fps, candidates, software_ok=False)  # 녹화는 늘 GPU 먼저 (실시간)
+        video = container.add_stream(name, rate=fps, options=chosen)
         video.width, video.height = size
         video.pix_fmt = "nv12"
         video.time_base = Fraction(1, fps)

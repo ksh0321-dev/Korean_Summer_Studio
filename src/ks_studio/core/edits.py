@@ -6,8 +6,8 @@
 from collections.abc import Callable
 from dataclasses import replace
 
-from ks_studio.core.subtitles import Subtitles, map_times
-from ks_studio.core.project import MAIN_TRACK, MIN_VIDEO_TRACKS, Clip, Placed, Placement, Project, new_id
+from ks_studio.core.project import MAIN_TRACK, MIN_VIDEO_TRACKS, Clip, Placed, Placement, Project, Sound, TextItem, new_id
+from ks_studio.core.subtitles import MIN_CUE, Subtitles, map_times
 
 
 def insert_clip(project: Project, index: int, clip: Clip) -> Project:
@@ -74,7 +74,72 @@ def delete_range(project: Project, start: int, end: int) -> Project:
         replace(o, start=o.start - (end - start)) if o.start >= end else o for o in cut.overlays if o.clip.id not in inside
     )
     markers = tuple(m - (end - start) if m >= end else m for m in cut.markers if not start <= m < end)
-    return replace(cut, clips=clips, overlays=overlays, markers=markers, subtitles=_cut_cues(cut, start, end))
+    return replace(cut, clips=clips, overlays=overlays, markers=markers, subtitles=_cut_cues(cut, start, end),
+                   texts=_cut_texts(cut, start, end), sounds=_cut_sounds(cut, start, end))
+
+
+def _cut_texts(project: Project, start: int, end: int) -> tuple[TextItem, ...]:
+    """글자도 자막처럼 구간을 잘라내고 뒤를 당긴다."""
+    fps, length = project.fps, (end - start) / project.fps
+    lo, hi = start / fps, end / fps
+
+    def move(t: float) -> float:
+        return t if t < lo else (lo if t < hi else t - length)
+
+    kept = []
+    for item in project.texts:
+        a, b = move(item.start), move(item.end)
+        if b - a >= MIN_CUE:
+            kept.append(replace(item, start=round(a, 3), end=round(b, 3)))
+    return tuple(kept)
+
+
+def _cut_sounds(project: Project, start: int, end: int) -> tuple[Sound, ...]:
+    """소리 줄도 구간을 잘라내고 뒤를 당긴다: 구간에 걸친 조각은 앞·뒤로 나뉜다 (원본 소리 위치는 그대로 이어진다)."""
+    fps = project.fps
+    out = []
+    for s in project.sounds:
+        s_end = s.start + round(s.length_ms * fps / 1000)
+        if s_end <= start:
+            out.append(s)
+        elif s.start >= end:
+            out.append(replace(s, start=s.start - (end - start)))
+        else:
+            if s.start < start:  # 앞 조각
+                out.append(replace(s, length_ms=round((start - s.start) * 1000 / fps), fade_out_ms=0))
+            if s_end > end:  # 뒤 조각
+                skip = round((end - s.start) * 1000 / fps)
+                out.append(replace(s, start=start, in_ms=s.in_ms + skip, length_ms=s.length_ms - skip, fade_in_ms=0, id=new_id()))
+    return tuple(out)
+
+
+def set_texts(project: Project, texts: tuple[TextItem, ...]) -> Project:
+    return replace(project, texts=tuple(sorted(texts, key=lambda x: (x.start, x.end))))
+
+
+def set_sounds(project: Project, sounds: tuple[Sound, ...]) -> Project:
+    return replace(project, sounds=tuple(sorted(sounds, key=lambda s: s.start)))
+
+
+def add_sound(project: Project, source: str, start: int, length_ms: int, duck: bool = True) -> Project:
+    """소리 줄에 배경 음악을 놓는다 (처음부터, length_ms만큼)."""
+    return set_sounds(project, (*project.sounds, Sound(source, start, 0, max(1, length_ms), duck=duck)))
+
+
+def detach_audio(project: Project, clip_id: str) -> Project:
+    """클립 소리를 떼어 소리 줄로 (그 자리 그대로) — 화면과 소리를 따로 자르고 옮길 수 있다 (J컷·L컷).
+
+    속도를 바꾼 클립은 떼지 않는다 (소리 줄 조각은 속도가 없다). 이미 뗐으면 그대로.
+    """
+    placed = project.find(clip_id)
+    if placed is None or placed.clip.detached or placed.clip.speed != 1.0:
+        return project
+    clip, fps = placed.clip, project.fps
+    in_ms = round(clip.in_frame / clip.fps * 1000) - clip.audio_offset_ms
+    sound = Sound(clip.source, placed.start, max(0, in_ms), round((placed.end - placed.start) * 1000 / fps),
+                  volume_db=clip.volume_db, fade_in_ms=clip.fade_in_ms, fade_out_ms=clip.fade_out_ms, duck=False)
+    project = _replace_clip(project, clip_id, lambda c: replace(c, detached=True))
+    return set_sounds(project, (*project.sounds, sound))
 
 
 def _cut_cues(project: Project, start: int, end: int) -> Subtitles:
@@ -96,14 +161,25 @@ def delete_ranges(project: Project, ranges: list[tuple[int, int]]) -> Project:
     return project
 
 
-CLIP_PROPS = {"volume_db", "fade_in_ms", "fade_out_ms", "scale", "pos_x", "pos_y", "opacity", "transition_ms"}
+CLIP_PROPS = {"volume_db", "fade_in_ms", "fade_out_ms", "scale", "pos_x", "pos_y", "opacity", "transition_ms",
+              "speed", "crop", "rotation", "flip", "brightness", "contrast", "saturation", "temperature", "look", "lut"}
 
 
 def set_clip_props(project: Project, clip_ids: set[str], **changes) -> Project:
-    """선택한 클립들의 소리·화면 속성(볼륨·페이드·크기·위치·투명도·디졸브)을 바꾼다."""
+    """선택한 클립들의 소리·화면 속성(볼륨·페이드·크기·위치·투명도·디졸브·속도·모양·색)을 바꾼다.
+
+    속도를 바꾸면 길이가 바뀐다 — 위 줄에서 옆 클립과 겹치게 되면 거부한다 (받은 project 그대로).
+    """
     assert set(changes) <= CLIP_PROPS, changes
+    if "speed" in changes and any(p.clip.detached for p in project.placed() if p.clip.id in clip_ids):
+        return project  # 소리를 떼어 낸 클립은 속도를 바꾸지 않는다 (소리 줄 조각과 어긋난다)
+    before = project
     for clip_id in clip_ids:
         project = _replace_clip(project, clip_id, lambda c: replace(c, **changes))
+    if "speed" in changes:
+        for o in project.overlays:
+            if o.clip.id in clip_ids and not _without(project, o.clip.id).fits(o.track, o.start, project.length(o.clip)):
+                return before
     return project
 
 
@@ -282,7 +358,7 @@ def follow_main(before: Project, after: Project) -> Project:
         if target is None:  # 붙어 있던 V1 클립이 지워짐
             continue
         # 앞쪽을 잘라 그 장면이 없어졌으면 클립 맨 앞에 붙인다
-        local = max(0, round((seconds - target.clip.in_frame / target.clip.fps) * after.fps))
+        local = max(0, round(after.local_of(target.clip, seconds)))
         followers.append(replace(o, start=target.start + local))
     # 움직이지 않은 클립이 자리를 먼저 차지하고, 움직인 클립이 겹치면 위로 올라간다
     followers.sort(key=lambda o: (o not in untouched, o.start, o.track))
@@ -313,7 +389,7 @@ def _follow_cues(before: Project, after: Project, old_main, new_main, old_ids: s
         target = _main_showing(new_main, anchor.clip, seconds, old_ids)
         if target is None:  # 붙어 있던 V1 클립이 지워짐
             continue
-        local = max(0, round((seconds - target.clip.in_frame / target.clip.fps) * after.fps))
+        local = max(0, round(after.local_of(target.clip, seconds)))
         start = (target.start + local) / after.fps
         cues.append(map_times(cue, lambda t, shift=start - cue.start: t + shift))
     return replace(after.subtitles, cues=tuple(sorted((c for c in cues if c is not None), key=lambda c: (c.start, c.end))))

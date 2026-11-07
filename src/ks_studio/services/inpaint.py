@@ -67,12 +67,10 @@ def _session(kind: str, folder: Path):
     """모델 세션은 하나만 (샘플 컷·미리보기·보정본 렌더 스레드가 같이 쓴다 — run은 여러 스레드에서 불러도 된다)."""
     with _sessions_lock:
         if kind not in _sessions:
-            import onnxruntime
+            from ks_studio.services.accel import onnx_session
 
-            if hasattr(onnxruntime, "preload_dlls"):
-                onnxruntime.preload_dlls()
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            _sessions[kind] = onnxruntime.InferenceSession(str(folder / FILL_MODELS[kind][1]), providers=providers)
+            # MI-GAN은 입력 크기가 바뀌는 모델이라 Core ML(맥)에 맞지 않는다 → 맥에선 CPU, LaMa(512 고정)는 Core ML
+            _sessions[kind] = onnx_session(folder / FILL_MODELS[kind][1], coreml=kind != "migan")
         return _sessions[kind]
 
 

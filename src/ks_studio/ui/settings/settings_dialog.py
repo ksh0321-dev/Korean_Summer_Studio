@@ -31,6 +31,8 @@ from ks_studio.services.devices import (
     find_microphone,
     microphone_refs,
 )
+from ks_studio.core.workspace import Workspace
+from ks_studio.ui.settings.general_tabs import DefaultsTab, PerformanceTab, StorageTab
 from ks_studio.ui.settings.shortcuts import ShortcutTab
 from ks_studio.ui.widgets.level_meter import LevelMeter
 from ks_studio.ui.widgets.video_view import VideoView
@@ -53,7 +55,7 @@ def _fill(combo: QComboBox, refs: list[DeviceRef], selected: DeviceRef | None) -
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, devices: DeviceMonitor, parent: QWidget | None = None,
-                 shortcuts: list | None = None) -> None:
+                 shortcuts: list | None = None, workspace: Workspace | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("설정")
         self.resize(960, 680)
@@ -114,6 +116,11 @@ class SettingsDialog(QDialog):
         self.shortcut_tab = ShortcutTab(shortcuts, settings.shortcuts) if shortcuts else None
         if self.shortcut_tab is not None:
             tabs.addTab(self.shortcut_tab, "단축키 (컷편집)")
+        self.performance_tab = PerformanceTab(settings)
+        self.defaults_tab = DefaultsTab(settings)
+        tabs.addTab(self.performance_tab, "성능")
+        tabs.addTab(StorageTab(workspace), "저장 공간")
+        tabs.addTab(self.defaults_tab, "기본값")
         layout = QVBoxLayout(self)
         layout.addWidget(tabs, 1)
         layout.addWidget(buttons)
@@ -130,6 +137,8 @@ class SettingsDialog(QDialog):
             microphone=self.mic_combo.currentData(),
             media_import=self.import_combo.currentData(),
             shortcuts=self.shortcut_tab.overrides() if self.shortcut_tab is not None else self._settings.shortcuts,
+            **self.performance_tab.apply(self._settings),
+            **self.defaults_tab.apply(self._settings),
         )
 
     def accept(self) -> None:

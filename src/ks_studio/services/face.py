@@ -151,10 +151,12 @@ class FaceDetector:
 
             face_align.estimate_norm = _estimate_norm  # 폐기 예정 API 경고 없이 (위 설명)
 
+            from ks_studio.services.accel import onnx_providers
+
             app = FaceAnalysis(
                 name=MODEL_PACK,
                 root=str(MODELS_DIR),
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                providers=onnx_providers(),  # NVIDIA: CUDA · 맥: Core ML · 없으면 CPU
                 allowed_modules=["detection", "landmark_2d_106", "recognition"],
             )
             app.prepare(ctx_id=0, det_size=DETECT_SIZE)

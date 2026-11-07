@@ -6,7 +6,6 @@ AI 보정만 한 영상·녹화본도 파일로 바로 내보낼 수 있다 (자
 최종 파일: <프로젝트>/exports/final/<이름>_<비율>_<해상도>.mp4
 """
 
-import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -27,7 +26,8 @@ from PySide6.QtWidgets import (
 
 from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
-from ks_studio.services.deliver import CODECS, FITS, RATIOS, RESOLUTIONS, ExportWorker, OutputFormat
+from ks_studio.services.accel import open_folder
+from ks_studio.services.deliver import CODECS, FITS, PRESETS, RATIOS, RESOLUTIONS, ExportWorker, OutputFormat
 from ks_studio.services.sources import SourceCache
 from ks_studio.ui.editor.media_bin import VIDEO_FILTER
 from ks_studio.ui.widgets.clip_player import ClipPlayer
@@ -56,6 +56,7 @@ class ExportPage(QWidget):
         self._workspace: Workspace | None = None
         self._source: str | None = None
         self._imported: tuple[str, ...] = ()
+        self._default_preset = ""  # 설정 '기본값': 프로젝트를 처음 열 때 고를 프리셋
         self._project = Project()  # 컷편집 타임라인 (탭을 열 때 project.json에서)
         self.worker = ExportWorker(self)
         self.worker.progress.connect(self._on_progress)
@@ -91,6 +92,13 @@ class ExportPage(QWidget):
         fmt = OutputFormat()
         output = QGroupBox("출력 형식")
         form = QFormLayout(output)
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("직접 고르기", None)
+        for key, (label, _values) in PRESETS.items():
+            self.preset_combo.addItem(label, key)
+        self.preset_combo.setToolTip("고르면 비율·맞추기·해상도·형식·소리 크기 맞추기를 한 번에 맞춥니다")
+        self.preset_combo.activated.connect(self._apply_preset)
+        form.addRow("프리셋", self.preset_combo)
         self.ratio_combo = _combo({k: v[0] for k, v in RATIOS.items()}, fmt.ratio)
         self.fit_combo = _combo(FITS, fmt.fit)
         self.size_combo = _combo(RESOLUTIONS, fmt.short)
@@ -100,6 +108,16 @@ class ExportPage(QWidget):
         form.addRow("맞추기", self.fit_combo)
         form.addRow("해상도", self.size_combo)
         form.addRow("형식", self.codec_combo)
+        # 소리 다듬기 (컷편집 타임라인을 내보낼 때)
+        self.loudness_check = QCheckBox("소리 크기 맞추기 (유튜브 기준 -14 LUFS)")
+        self.loudness_check.setToolTip("작게 녹음된 영상은 키우고 너무 큰 영상은 줄여, 플랫폼이 다시 줄이거나 키우지 않게 맞춥니다")
+        self.denoise_check = QCheckBox("잡음 줄이기 (바람·웅웅 소리)")
+        self.denoise_check.setToolTip("고르게 깔린 잡음을 줄입니다. 너무 시끄러운 곳의 소리는 다 지우지 못합니다")
+        for check in (self.loudness_check, self.denoise_check):
+            check.toggled.connect(lambda _on: self.preset_combo.setCurrentIndex(0))
+            form.addRow("", check)
+        for combo in (self.ratio_combo, self.fit_combo, self.size_combo, self.codec_combo):
+            combo.activated.connect(lambda _i: self.preset_combo.setCurrentIndex(0))  # 손으로 바꾸면 '직접 고르기'
         self.subtitle_check = QCheckBox("자막 넣기")
         self.subtitle_check.setChecked(True)
         self.preview_button = QPushButton("👁 저해상도 미리보기 (800p)")
@@ -144,12 +162,19 @@ class ExportPage(QWidget):
             self._source = None
             self._imported = ()
             self.player.release()
+            index = self.preset_combo.findData(self._default_preset) if self._default_preset else -1
+            if index > 0:
+                self.preset_combo.setCurrentIndex(index)
+                self._apply_preset(index)
         self._project = Project.load(workspace.project_file)  # 컷편집에서 고쳤을 수 있다 (탭을 바꾸면 저장된다)
         self._fill_list()
         self._update_controls()
 
     def deactivate(self) -> None:
         self.player.player.pause()
+
+    def set_default_preset(self, key: str) -> None:
+        self._default_preset = key
 
     # ── 영상 ────────────────────────────────────────────────────
 
@@ -199,7 +224,20 @@ class ExportPage(QWidget):
 
     def _format(self) -> OutputFormat:
         return OutputFormat(self.ratio_combo.currentData(), self.fit_combo.currentData(),
-                            self.size_combo.currentData(), self.codec_combo.currentData())
+                            self.size_combo.currentData(), self.codec_combo.currentData(),
+                            self.loudness_check.isChecked(), self.denoise_check.isChecked())
+
+    def _apply_preset(self, index: int) -> None:
+        key = self.preset_combo.itemData(index)
+        if key is None:
+            return
+        ratio, fit, short, codec, loudness = PRESETS[key][1]
+        for combo, value in ((self.ratio_combo, ratio), (self.fit_combo, fit), (self.size_combo, short), (self.codec_combo, codec)):
+            combo.setCurrentIndex(max(0, combo.findData(value)))
+        self.loudness_check.blockSignals(True)
+        self.loudness_check.setChecked(loudness)
+        self.loudness_check.blockSignals(False)
+        self._update_controls()
 
     # ── 미리보기 · 내보내기 ──────────────────────────────────────
 
@@ -255,7 +293,7 @@ class ExportPage(QWidget):
     def _open_folder(self) -> None:
         folder = self._workspace.final_dir
         folder.mkdir(parents=True, exist_ok=True)
-        os.startfile(folder)  # Windows 탐색기
+        open_folder(folder)  # 탐색기 · Finder
 
     def _update_controls(self) -> None:
         ready = self._source is not None
@@ -267,6 +305,10 @@ class ExportPage(QWidget):
         else:
             self.subtitle_check.setText("자막은 컷편집 타임라인을 내보낼 때 들어갑니다")
         self.subtitle_check.setEnabled(cues > 0)
+        timeline = self._source == TIMELINE
+        for check in (self.loudness_check, self.denoise_check):  # 소리 다듬기는 컷편집 타임라인에만
+            check.setEnabled(timeline)
+            check.setToolTip(check.toolTip() if timeline else "컷편집 타임라인을 내보낼 때 쓸 수 있습니다")
         for widget in (self.preview_button, self.export_button):
             widget.setEnabled(ready and not busy)
         self.cancel_button.setVisible(busy)

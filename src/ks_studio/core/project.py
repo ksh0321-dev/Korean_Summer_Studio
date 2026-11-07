@@ -11,6 +11,8 @@
 - 클립마다 크기·위치·투명도(화면 속 화면)가 있다. 기본값이면 화면을 다 덮고, 아니면 아래 줄 위에 겹쳐 그린다.
 - V1 디졸브(캡컷 방식): 뒤 클립의 transition_ms만큼 앞 클립 끝과 겹친다 → 전체 길이가 그만큼 짧아진다.
 - 마커: 타임라인 프레임 번호 목록.
+- 클립마다 속도(0.25~4배)·자르기·회전·뒤집기·색 보정이 있다. 속도는 length·source_frame·source_time·local_of 네 곳에만 들어간다.
+- 글자(texts): 자막과 따로 화면 아무 곳에 넣는 제목·강조 문구 (초 단위). 소리 줄(sounds): 배경 음악과 떼어 낸 클립 소리.
 - 모든 객체는 불변(frozen). 편집은 새 Project를 만든다 (core.edits) → 되돌리기는 스냅샷만 쌓으면 된다.
 """
 
@@ -21,11 +23,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ks_studio.core.jsonio import write_json_atomic
-from ks_studio.core.subtitles import Subtitles
+from ks_studio.core.subtitles import CaptionStyle, Subtitles
 
 PROJECT_FPS = 30
 TIMELINE_FPS_CHOICES = (30, 60)
-FILE_VERSION = 9  # 2: 위 줄 · 3: 줄 음소거·숨김 · 4: 영상 줄 개수 · 5: 연동 · 6: 볼륨·페이드 · 7: 화면 속 화면·디졸브·마커 · 8: 뺀 녹화본 · 9: 자막
+FILE_VERSION = 10  # 2: 위 줄 · 3: 줄 음소거·숨김 · 4: 영상 줄 개수 · 5: 연동 · 6: 볼륨·페이드 · 7: 화면 속 화면·디졸브·마커 · 8: 뺀 녹화본 · 9: 자막 · 10: 속도·자르기·색·글자·소리 줄
+# · 10: 속도·자르기·회전·색·글자·소리 줄
+SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
 MAIN_TRACK = 1
 DEFAULT_VIDEO_TRACKS = 3  # 새 프로젝트의 영상 줄 수 (V1~V3)
 MIN_VIDEO_TRACKS = 2  # 이보다 적게는 지울 수 없다
@@ -56,11 +60,71 @@ class Clip:
     pos_y: float = 0.5
     opacity: float = 1.0
     transition_ms: int = 0  # V1에서 앞 클립과 디졸브로 겹치는 시간 (이 클립이 앞 클립 위로 서서히 나타난다)
+    speed: float = 1.0  # 재생 속도 (2 = 두 배 빠르게, 길이는 절반). 소리는 높이를 지킨 채 빨라진다
+    crop: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)  # 잘라낼 양 (왼쪽, 위, 오른쪽, 아래) — 원본 크기 비율
+    rotation: int = 0  # 시계 방향 0·90·180·270도
+    flip: bool = False  # 좌우 뒤집기
+    brightness: float = 0.0  # 색 보정 -1~1 (0 = 그대로)
+    contrast: float = 0.0
+    saturation: float = 0.0
+    temperature: float = 0.0  # -1 차갑게(푸르게) ~ 1 따뜻하게(노랗게)
+    look: str = ""  # 필터 (core.color.LOOKS의 키, 빈 값 = 없음)
+    lut: str = ""  # .cube LUT 파일 (Workspace.to_source 형식, 빈 값 = 없음) — 다른 프로그램의 색감 그대로
+    detached: bool = False  # 소리를 떼어 냈다 — 이 클립 소리는 안 나고 소리 줄(sounds)의 조각이 대신 난다
+
+    @property
+    def shaped(self) -> bool:
+        """자르기·회전·뒤집기를 했나 (원본 그림 모양을 바꾼다)."""
+        return any(self.crop) or self.rotation % 360 != 0 or self.flip
+
+    @property
+    def graded(self) -> bool:
+        """색 보정·필터를 했나."""
+        return bool(self.brightness or self.contrast or self.saturation or self.temperature or self.look or self.lut)
 
     @property
     def covers(self) -> bool:
         """화면을 다 덮는지 (기본 크기·위치·투명도). 덮으면 그 아래 줄은 그릴 필요가 없다."""
         return self.scale == 1.0 and self.pos_x == 0.5 and self.pos_y == 0.5 and self.opacity == 1.0
+
+
+@dataclass(frozen=True)
+class TextItem:
+    """화면에 넣는 글자 (제목·강조 문구). 시각은 타임라인 초, 자리는 글 가운데의 화면 비율."""
+
+    start: float
+    end: float
+    text: str
+    x: float = 0.5
+    y: float = 0.2
+    style: CaptionStyle = CaptionStyle(size=0.08, color="#ffffff", outline="#000000", bottom=0.0)
+    fade_in_ms: int = 0  # 나타날 때 서서히 (0 = 바로)
+    fade_out_ms: int = 0  # 사라질 때 서서히
+    id: str = field(default_factory=new_id)
+
+    def opacity_at(self, seconds: float) -> float:
+        """그 시각의 진하기 0~1 (페이드 인·아웃)."""
+        opacity = 1.0
+        if self.fade_in_ms > 0:
+            opacity = min(opacity, (seconds - self.start) * 1000 / self.fade_in_ms)
+        if self.fade_out_ms > 0:
+            opacity = min(opacity, (self.end - seconds) * 1000 / self.fade_out_ms)
+        return max(0.0, min(1.0, opacity))
+
+
+@dataclass(frozen=True)
+class Sound:
+    """소리 줄의 조각: 배경 음악 또는 영상 클립에서 떼어 낸 소리. 시작은 타임라인 프레임, 구간은 원본 소리의 ms."""
+
+    source: str  # Workspace.to_source 형식 (음악 파일 또는 영상 파일)
+    start: int  # 타임라인 프레임
+    in_ms: int  # 원본 소리에서 쓰기 시작하는 곳
+    length_ms: int
+    volume_db: float = 0.0
+    fade_in_ms: int = 0
+    fade_out_ms: int = 0
+    duck: bool = True  # 말소리가 나는 동안 저절로 작아진다 (배경 음악). 떼어 낸 말소리는 False
+    id: str = field(default_factory=new_id)
 
 
 @dataclass(frozen=True)
@@ -117,21 +181,27 @@ class Project:
     # 자막: 타임라인 시각(초)의 자막 줄 + 모양. 영상에 굽지 않고 들고 있다가 내보낼 때 입힌다
     # (AI 얼굴 보정은 자막 없는 영상에 해야 하므로 컷편집 결과에 자막을 굽지 않는다). 연동이 켜져 있으면 V1을 따라간다
     subtitles: Subtitles = field(default_factory=Subtitles)
+    texts: tuple[TextItem, ...] = ()  # 화면에 넣는 글자 (내보낼 때 굽는다)
+    sounds: tuple[Sound, ...] = ()  # 소리 줄: 배경 음악 · 떼어 낸 클립 소리
 
     def length(self, clip: Clip) -> int:
-        """클립이 타임라인에서 차지하는 프레임 수 (최소 1)."""
-        return max(1, round((clip.out_frame - clip.in_frame) * self.fps / clip.fps))
+        """클립이 타임라인에서 차지하는 프레임 수 (최소 1). 2배속이면 절반."""
+        return max(1, round((clip.out_frame - clip.in_frame) * self.fps / clip.fps / clip.speed))
 
     def source_frame(self, clip: Clip, local: int) -> int:
         """클립 안 타임라인 위치 local에 보여줄 원본 프레임 번호 = 시각이 가장 가까운 프레임 (딱 중간이면 앞 프레임).
 
         내림을 쓰면 원본 fps가 타임라인보다 아주 조금 낮을 때(갤럭시 29.996fps) 항상 한 프레임 옛 장면이 나온다 (실측 -32ms).
         """
-        return min(clip.out_frame - 1, clip.in_frame + math.floor(local * clip.fps / self.fps + 0.5 - 1e-6))
+        return min(clip.out_frame - 1, clip.in_frame + math.floor(local * clip.speed * clip.fps / self.fps + 0.5 - 1e-6))
 
     def source_time(self, clip: Clip, local: float) -> float:
         """클립 안 타임라인 위치 local의 원본 시각(초)."""
-        return clip.in_frame / clip.fps + local / self.fps
+        return clip.in_frame / clip.fps + local * clip.speed / self.fps
+
+    def local_of(self, clip: Clip, seconds: float) -> float:
+        """원본 시각 seconds가 클립 안 타임라인 위치(프레임)로 어디인가 (source_time의 거꾸로)."""
+        return (seconds - clip.in_frame / clip.fps) * self.fps / clip.speed
 
     def overlap_frames(self, previous_length: int, previous_overlap: int, clip: Clip) -> int:
         """V1 디졸브로 앞 클립과 겹치는 프레임 수. 두 클립을 다 먹거나, 앞 클립의 앞 디졸브와 겹치지 않게 줄인다."""
@@ -173,7 +243,8 @@ class Project:
     @property
     def duration(self) -> int:
         """V1 끝과 위 줄 클립 끝 중 늦은 쪽."""
-        return max([self.main_duration, *(o.start + self.length(o.clip) for o in self.overlays)])
+        sounds = (s.start + round(s.length_ms * self.fps / 1000) for s in self.sounds)
+        return max([self.main_duration, *(o.start + self.length(o.clip) for o in self.overlays), *sounds])
 
     def placed(self) -> list[Placed]:
         """모든 줄의 클립. V1은 순서대로 이어 붙인 위치를 계산해 넣는다."""
@@ -245,9 +316,9 @@ class Project:
         return cls(
             fps=data["fps"],
             media=tuple(data["media"]),
-            clips=tuple(Clip(**c) for c in data["clips"]),
+            clips=tuple(_clip(c) for c in data["clips"]),
             overlays=tuple(
-                Placement(Clip(**o["clip"]), o["track"], o["start"]) for o in data.get("overlays", [])  # 버전 1엔 없다
+                Placement(_clip(o["clip"]), o["track"], o["start"]) for o in data.get("overlays", [])  # 버전 1엔 없다
             ),
             muted=tuple(data.get("muted", [])),  # 버전 2까지는 없다
             hidden=tuple(data.get("hidden", [])),
@@ -257,4 +328,19 @@ class Project:
             markers=tuple(data.get("markers", [])),  # 버전 6까지는 없다
             removed=tuple(data.get("removed", [])),  # 버전 7까지는 없다
             subtitles=Subtitles.from_dict(data.get("subtitles", {})),  # 버전 8까지는 없다
+            texts=tuple(_text(t) for t in data.get("texts", [])),  # 버전 9까지는 없다
+            sounds=tuple(Sound(**{k: v for k, v in s.items() if k in Sound.__dataclass_fields__}) for s in data.get("sounds", [])),
         )
+
+
+def _clip(data: dict) -> Clip:
+    """저장된 클립 → Clip. JSON에서 목록이 된 자르기 값을 튜플로 (같은지 비교·해시가 되게), 모르는 칸은 버린다."""
+    values = {k: v for k, v in data.items() if k in Clip.__dataclass_fields__}
+    if "crop" in values:
+        values["crop"] = tuple(float(v) for v in values["crop"])
+    return Clip(**values)
+
+
+def _text(data: dict) -> TextItem:
+    values = {k: v for k, v in data.items() if k in TextItem.__dataclass_fields__ and k != "style"}
+    return TextItem(**values, style=CaptionStyle.from_dict(data.get("style", {})))

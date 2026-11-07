@@ -31,6 +31,7 @@ from ks_studio.app.paths import CAPTION_STYLES_DIR, GLOSSARY_PATH
 from ks_studio.core.glossary import load_glossary, save_glossary
 from ks_studio.core.presets import delete_preset, list_presets, valid_name
 from ks_studio.core.subtitles import (
+    ALIGNS,
     TASKS,
     CaptionStyle,
     Subtitles,
@@ -193,6 +194,19 @@ class CaptionPanel(QWidget):
         self.box_spin.setRange(10, 100)
         self.box_spin.setSuffix(" %")
         self.box_spin.setToolTip("배경 상자 진하기")
+        self.shadow_spin = QSpinBox()
+        self.shadow_spin.setRange(0, 100)
+        self.shadow_spin.setSuffix(" %")
+        self.shadow_spin.setToolTip("그림자 진하기 (0 = 없음)")
+        self.bold_check = QCheckBox("굵게")
+        self.italic_check = QCheckBox("기울임")
+        self.align_combo = QComboBox()
+        for key, label in ALIGNS.items():
+            self.align_combo.addItem(label, key)
+        self.align_combo.setToolTip("두 줄 이상일 때 줄 맞춤")
+        self.bold_check.toggled.connect(self._on_style)
+        self.italic_check.toggled.connect(self._on_style)
+        self.align_combo.currentIndexChanged.connect(self._on_style)
         self.bottom_spin = QSpinBox()
         self.bottom_spin.setRange(0, round(CAPTION_BOTTOM_MAX * 100))
         self.bottom_spin.setSuffix(" %")
@@ -200,7 +214,7 @@ class CaptionPanel(QWidget):
         self.safe_check = QCheckBox("숏폼 안전 영역 보기")
         self.safe_check.setToolTip("세로 영상에서 쇼츠·릴스·틱톡 화면(제목·버튼)이 덮는 곳을 미리보기에 붉게 보입니다")
         self.safe_check.toggled.connect(self.safe_zone_toggled.emit)
-        for spin in (self.size_spin, self.second_spin, self.outline_spin, self.box_spin, self.bottom_spin):
+        for spin in (self.size_spin, self.second_spin, self.outline_spin, self.box_spin, self.bottom_spin, self.shadow_spin):
             spin.valueChanged.connect(self._on_style)
         for button in (self.color_button, self.second_color_button, self.outline_button, self.box_button):
             button.color_changed.connect(self._on_style)
@@ -231,7 +245,9 @@ class CaptionPanel(QWidget):
         form.addRow("글꼴", self.font_combo)
         form.addRow("첫째 줄", row(self.size_spin, self.color_button))
         form.addRow("둘째 줄", row(self.second_spin, self.second_color_button))
+        form.addRow("글씨", row(self.bold_check, self.italic_check, "줄 맞춤", self.align_combo))
         form.addRow("테두리", row(self.outline_spin, self.outline_button))
+        form.addRow("그림자", row(self.shadow_spin))
         form.addRow(self.box_check, row(self.box_spin, self.box_button))
         form.addRow("아래 여백", row(self.bottom_spin, self.safe_check))
         toggle = QToolButton()
@@ -251,7 +267,8 @@ class CaptionPanel(QWidget):
 
     def _show_style(self, style: CaptionStyle) -> None:
         widgets = (self.size_spin, self.second_spin, self.outline_spin, self.box_spin, self.bottom_spin, self.font_combo,
-                   self.box_check, self.color_button, self.second_color_button, self.outline_button, self.box_button)
+                   self.box_check, self.color_button, self.second_color_button, self.outline_button, self.box_button,
+                   self.shadow_spin, self.bold_check, self.italic_check, self.align_combo)
         for w in widgets:
             w.blockSignals(True)
         self.size_spin.setValue(round(style.size * 100))
@@ -259,6 +276,10 @@ class CaptionPanel(QWidget):
         self.outline_spin.setValue(round(style.outline_width * 100))
         self.box_spin.setValue(round(style.box_opacity * 100))
         self.bottom_spin.setValue(round(style.bottom * 100))
+        self.shadow_spin.setValue(round(style.shadow * 100))
+        self.bold_check.setChecked(style.bold)
+        self.italic_check.setChecked(style.italic)
+        self.align_combo.setCurrentIndex(max(0, self.align_combo.findData(style.align)))
         index = self.font_combo.findData(style.font)
         if index < 0:  # 이 PC에 없는 글꼴 — 이름은 남겨 둔다 (그리는 건 비슷한 글꼴로)
             self.font_combo.addItem(f"{style.font} (이 PC에 없음)", style.font)
@@ -279,9 +300,16 @@ class CaptionPanel(QWidget):
             second_size=self.second_spin.value() / 100, second_color=self.second_color_button.color(),
             font=self.font_combo.currentData(), outline=self.outline_button.color(), outline_width=self.outline_spin.value() / 100,
             box=self.box_check.isChecked(), box_color=self.box_button.color(), box_opacity=self.box_spin.value() / 100,
+            shadow=self.shadow_spin.value() / 100, bold=self.bold_check.isChecked(), italic=self.italic_check.isChecked(),
+            align=self.align_combo.currentData(),
         )
         if style != self._subs.style:
             self._emit(replace(self._subs, style=style))
+
+    def showEvent(self, event) -> None:
+        """탭을 열 때 모양 목록을 다시 읽는다 (자막·글자 탭이 같은 목록을 쓴다 — 다른 탭에서 저장한 것도 보이게)."""
+        super().showEvent(event)
+        self._fill_styles(self.style_combo.currentData())
 
     def _fill_styles(self, current: str | None = None) -> None:
         self.style_combo.clear()

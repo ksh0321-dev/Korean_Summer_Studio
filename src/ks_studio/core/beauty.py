@@ -90,7 +90,7 @@ EFFECTS = (  # BeautySettings의 효과 세기 칸 (chin만 -1~1, 나머지 0~1)
     "smooth", "blemish", "brighten", "dark_circle",
     "slim", "cheekbone", "chin", "eyes", "nose_slim", "nose_length", "smile", "face_small",
     "blush", "contour", "eyeshadow", "lip", "lip_gloss", "teeth", "eye_clear",
-    "waist", "shoulders", "legs",
+    "waist", "shoulders", "legs", "bg_blur",
 )
 PRESET_FIELDS = (*EFFECTS, "eyeshadow_color", "lip_color")  # 프리셋에 담는 칸 (효과 세기 + 색)
 
@@ -121,6 +121,7 @@ class BeautySettings:
     waist: float = 0.0  # 허리 잘록 (몸매 — 몸의 점·사람 분리 모델)
     shoulders: float = 0.0  # 어깨 좁게
     legs: float = 0.0  # 다리 길게
+    bg_blur: float = 0.0  # 배경 흐림 (인물 모드 — 사람 분리 모델로 보정할 사람 말고 다 흐리게)
     fill: str = "migan"  # 몸매·얼굴 작게로 드러난 배경 메꾸기: telea(빠르게) · migan · lama (services.inpaint.FILLS)
     approved: bool = False  # 샘플 컷을 보고 OK했는지 — 그 뒤에야 미리보기와 보정본 만들기를 한다
     target: tuple[float, ...] | None = None  # 보정할 사람의 얼굴 인식값 (없으면 가장 큰 얼굴)

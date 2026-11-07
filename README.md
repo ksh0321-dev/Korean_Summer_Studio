@@ -120,6 +120,36 @@ python -m ks_studio
 
 새 버전으로 바꾸기: `git pull` 한 뒤 `pip install -e ".[dev]"`. 개인 설정·프리셋은 `user\`, 모델은 `models\`에 남아 있습니다.
 
+## 설치 — macOS (Apple Silicon, 실험적)
+
+맥에서도 같은 소스 코드로 돕니다. 맥에서는 아래처럼 동작이 다릅니다.
+
+- AI 모델은 **Core ML**(Apple GPU·Neural Engine)로, 음성 자막은 **mlx-whisper**(Apple GPU)로 돌립니다.
+- 영상 인코딩은 **VideoToolbox**를 쓰고, 안 되면 CPU로 넘어갑니다.
+
+> ⚠ 아직 실제 맥에서 끝까지 확인하지 못했습니다. 안 되는 곳이 있으면 이슈로 알려 주세요.
+> NVIDIA PC보다 AI 보정이 느립니다 (특히 4K). 배포용 exe 만들기는 Windows 전용입니다.
+
+**터미널(Terminal)** 에서 입력합니다.
+
+```bash
+xcode-select --install                 # 처음 한 번 (insightface를 설치할 때 컴파일러가 필요)
+# Miniconda(arm64) 설치 뒤:
+git clone https://github.com/ksh0321-dev/Korean_Summer_Studio.git
+cd Korean_Summer_Studio
+conda create -n ks-studio python=3.12 -y
+conda activate ks-studio
+pip install -e ".[dev]"
+pip install -e ".[ai]"                 # 맥에선 onnxruntime 기본판 + mlx-whisper가 깔린다 (NVIDIA 패키지는 빠진다)
+pip uninstall -y opencv-contrib-python opencv-python
+pip install opencv-python
+python -c "import onnxruntime as o; print(o.get_available_providers())"   # CoreMLExecutionProvider가 보이면 OK
+python -m ks_studio
+```
+
+- 녹화하려면 **시스템 설정 → 개인정보 보호 및 보안 → 카메라·마이크**에서 터미널을 허용합니다.
+- 단축키의 Ctrl은 맥에서 ⌘(Command)입니다.
+
 ## 문제 해결
 
 | 증상 | 해결 |

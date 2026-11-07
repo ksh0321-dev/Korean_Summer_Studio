@@ -26,10 +26,15 @@ log = logging.getLogger(__name__)
 PREVIEW_BOX = (960, 540)  # 화면 크기를 알기 전의 미리보기 크기
 # 미리보기는 실제 화면 칸 크기(화소)로 그린다 — 예전엔 늘 960×540 안이라 세로 영상은 304×540을 늘려 흐릿했다.
 # 재생 중엔 이 크기까지만 (그 이상은 줄이는 비용만 늘고 차이가 작다), 멈춘 장면은 칸 크기 그대로. 원본보다 키우지 않는다
-PREVIEW_PLAY_MAX = (1920, 1080)
+PREVIEW_PLAY_MAX = (1920, 1080)  # 설정 '성능' 탭에서 바꾼다 (set_play_max)
 QUEUE_FRAMES = 12
 AUDIO_BUFFER_S = 0.2
 BYTES_PER_SAMPLE = 4  # float32 모노
+
+
+def set_play_max(size: tuple[int, int]) -> None:
+    global PREVIEW_PLAY_MAX
+    PREVIEW_PLAY_MAX = size
 
 
 class Player(QObject):

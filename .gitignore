@@ -32,6 +32,8 @@ __pycache__/
 /exports/
 /workspace/
 /.test/
+/backups/
+/luts/
 /sample_video_summer/
 /sample_video_phone/
 

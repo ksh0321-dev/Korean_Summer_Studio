@@ -47,6 +47,10 @@ class CaptionStyle:
     box: bool = False  # 글 뒤 배경 상자 (밝은 화면에서도 읽히게)
     box_color: str = "#000000"
     box_opacity: float = 0.55
+    shadow: float = 0.0  # 그림자 진하기 0~1 (0 = 없음) — 테두리 없이도 밝은 화면에서 읽히게
+    bold: bool = True
+    italic: bool = False
+    align: str = "center"  # 여러 줄일 때 줄 맞춤: ALIGNS의 키
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -66,6 +70,17 @@ class CaptionStyle:
             elif isinstance(value, str):
                 values[name] = value
         return cls(**values)
+
+
+ALIGNS = {"left": "왼쪽", "center": "가운데", "right": "오른쪽"}
+_TITLE = CaptionStyle(size=0.08, bottom=0.0)  # 화면 글자 기본 (project.TextItem과 같은 크기)
+STYLE_TEMPLATES = {  # 기본 제공 모양 (글자 탭 프리셋 목록 맨 위) — 이름 → 모양
+    "유튜브 제목 (노랑 · 굵은 테두리)": replace(_TITLE, size=0.1, color="#ffe000", outline_width=0.24, shadow=0.6),
+    "강조 상자 (빨강 상자 · 흰 글자)": replace(_TITLE, size=0.07, outline_width=0.0, box=True, box_color="#e5322d", box_opacity=1.0),
+    "깔끔한 흰 글자 (그림자)": replace(_TITLE, size=0.06, outline_width=0.0, shadow=0.8, bold=False),
+    "반투명 띠 (검은 상자)": replace(_TITLE, size=0.05, outline_width=0.0, box=True, box_opacity=0.7),
+    "형광 (하늘색 · 파란 테두리)": replace(_TITLE, size=0.08, color="#7df9ff", outline="#0040ff", outline_width=0.12, shadow=0.5),
+}
 
 
 @dataclass(frozen=True)

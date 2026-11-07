@@ -71,7 +71,7 @@ from ks_studio.services.face import (
 from ks_studio.services.body import body_models_ready
 from ks_studio.services.foreground import yield_to_playback
 from ks_studio.services.inpaint import MemoryFill, make_fill
-from ks_studio.services.reshape import BODY_EFFECTS, BodyFrames, BodyInfo, needs_body, overlay, reshape
+from ks_studio.services.reshape import BODY_EFFECTS, BodyFrames, BodyInfo, blur_background, needs_body, overlay, reshape
 from ks_studio.services.optimize import add_video_stream, make_optimized
 from ks_studio.services.yuv import from_planes, planes
 from ks_studio.services.sources import AUDIO_RATE, cache_name
@@ -114,7 +114,9 @@ def apply(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySetting
     if has_face:  # 얼굴 작게도 옆얼굴·작은 얼굴은 줄인다 (다른 얼굴 효과와 같게)
         strengths["face_small"] = settings.face_small * frontal_weight(landmarks) * size_weight(landmarks, frame_width or rgb.shape[1])
     changed = out.copy() if out is rgb else out
-    if reshape(changed, landmarks if has_face else None, strengths, body):
+    # 배경 흐림을 먼저: 몸매·얼굴 작게로 드러난 배경을 흐린 배경에서 메꾸게
+    blurred = blur_background(changed, body, settings.bg_blur)
+    if reshape(changed, landmarks if has_face else None, strengths, body) or blurred:
         return changed
     return out
 
@@ -246,7 +248,7 @@ def regions(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySetti
     효과마다 영역을 한 번에 칠하고 한 번만 섞는다 (원이 겹쳐도 진해지지 않게). 끈 효과는 그리지 않는다 (13가지라 다 그리면 어지럽다).
     몸매 효과를 켰고 body가 있으면 사람 층과 몸의 점을 먼저 그린다.
     """
-    if body is not None and any(getattr(settings, name) > 0 for name in BODY_EFFECTS):
+    if body is not None and any(getattr(settings, name) > 0 for name in (*BODY_EFFECTS, "bg_blur")):
         out = overlay(rgb, body)
     else:
         out = rgb.copy()

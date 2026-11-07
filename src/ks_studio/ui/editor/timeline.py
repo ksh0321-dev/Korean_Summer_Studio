@@ -30,8 +30,12 @@ from ks_studio.core.workspace import Workspace
 from ks_studio.services.sources import SourceCache
 
 MIME_MEDIA = "application/x-ks-media"
-TICKS_H, CAPTION_H = 24, 18  # 눈금자 띠 아래에 자막 띠 (자막 블록 = 자막 한 줄)
-RULER_H, ROW_H, AUDIO_H, GAP = TICKS_H + CAPTION_H, 56, 44, 4  # RULER_H = 줄이 시작하는 높이 (눈금자 + 자막 띠)
+# 눈금자 띠 아래에 자막 띠 (자막 블록 = 자막 한 줄), 글자 띠 (화면 글자), 소리 띠 (배경 음악·떼어 낸 소리)
+TICKS_H, CAPTION_H, TEXT_H, SOUND_H = 24, 18, 18, 18
+TEXT_TOP = TICKS_H + CAPTION_H
+SOUND_TOP = TEXT_TOP + TEXT_H
+RULER_H, ROW_H, AUDIO_H, GAP = SOUND_TOP + SOUND_H, 56, 44, 4  # RULER_H = 줄이 시작하는 높이 (눈금자 + 자막·글자·소리 띠)
+MIN_SOUND_MS = 300
 HEADER_W = 72  # 왼쪽 줄 이름 칸 (줄 이름 + 👁·🔊 버튼)
 BUTTON_W, BUTTON_H = 30, 24
 WAVE_H = 16  # 위 줄 클립 아래쪽 파형 띠
@@ -71,6 +75,8 @@ class TimelineWidget(QWidget):
     track_delete_requested = Signal(int)  # 줄 (확인 창은 받는 쪽에서)
     clip_menu_requested = Signal(QPoint)  # 클립·빈 곳 우클릭 (화면 좌표). 메뉴는 편집 화면이 만든다
     caption_clicked = Signal(int)  # 자막 띠에서 누른 자막 줄 번호 (끌어서 옮기기·길이 바꾸기는 edited로)
+    sound_clicked = Signal(str)  # 소리 띠에서 누른 조각 id
+    text_clicked = Signal(str)  # 글자 띠에서 누른 글자 id
 
     def __init__(self, sources: SourceCache, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -311,6 +317,8 @@ class TimelineWidget(QWidget):
         self._paint_ruler(painter)
         self._paint_markers(painter)
         self._paint_captions(painter, project)
+        self._paint_texts(painter, project)
+        self._paint_sounds(painter, project)
         if range_x is not None:
             painter.fillRect(QRectF(range_x[0], TICKS_H - 5, max(2.0, range_x[1] - range_x[0]), 5), RANGE_BAR)
         painter.setClipping(False)
@@ -333,6 +341,8 @@ class TimelineWidget(QWidget):
         painter.drawText(ADD_BUTTON, Qt.AlignmentFlag.AlignCenter, "+ 줄")
         painter.setPen(QColor("#9a9aa3"))
         painter.drawText(QRectF(0, TICKS_H, HEADER_W, CAPTION_H), Qt.AlignmentFlag.AlignCenter, "자막")
+        painter.drawText(QRectF(0, TEXT_TOP, HEADER_W, TEXT_H), Qt.AlignmentFlag.AlignCenter, "T 글자")
+        painter.drawText(QRectF(0, SOUND_TOP, HEADER_W, SOUND_H), Qt.AlignmentFlag.AlignCenter, "♪ 소리")
         painter.setClipRect(QRectF(0, RULER_H, HEADER_W, self.height()))
         painter.drawText(QRectF(0, self._audio_top(), HEADER_W, AUDIO_H), Qt.AlignmentFlag.AlignCenter, "A1")
         for track in range(1, self._project.video_tracks + 1):
@@ -429,8 +439,142 @@ class TimelineWidget(QWidget):
             subs, _ = update_cue(project.subtitles, drag["index"], end=max((end + moved) / fps, cue.start + MIN_CUE))
         return replace(project, subtitles=subs)
 
+    @staticmethod
+    def _text_lanes(texts) -> tuple[list[int], int]:
+        """시간이 겹치는 글자는 띠 안에서 위아래 칸으로 나눈다: (글자마다 칸 번호, 칸 수)."""
+        lanes, ends = [], []  # ends[칸] = 그 칸 마지막 글자의 끝
+        for item in texts:
+            lane = next((i for i, end in enumerate(ends) if end <= item.start), len(ends))
+            if lane == len(ends):
+                ends.append(item.end)
+            else:
+                ends[lane] = item.end
+            lanes.append(lane)
+        return lanes, max(1, len(ends))
+
+    def _text_rects(self, project: Project) -> list[QRectF]:
+        lanes, count = self._text_lanes(project.texts)
+        height = (TEXT_H - 4) / count
+        fps = project.fps
+        rects = []
+        for item, lane in zip(project.texts, lanes):
+            x0, x1 = self._x(item.start * fps), self._x(item.end * fps)
+            rects.append(QRectF(x0, TEXT_TOP + 2 + lane * height, max(3.0, x1 - x0), max(2.0, height - 1)))
+        return rects
+
+    def _paint_texts(self, painter: QPainter, project: Project) -> None:
+        """글자 띠: 화면 글자마다 블록. 누르면 '글자' 탭에서 고르고, 끌면 옮기고, 양 끝을 끌면 보이는 시간을 바꾼다."""
+        painter.fillRect(QRectF(HEADER_W, TEXT_TOP, self.width(), TEXT_H), QColor("#17141a"))
+        for item, rect in zip(project.texts, self._text_rects(project)):
+            if rect.right() < HEADER_W or rect.left() > self.width():
+                continue
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#8a4f9e"))
+            painter.drawRoundedRect(rect, 3, 3)
+            if rect.height() >= 10:
+                painter.setPen(QColor("#ffffff"))
+                painter.drawText(rect.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter, item.text.replace("\n", " "))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _text_at(self, x: float, y: float) -> int | None:
+        if not TEXT_TOP <= y < SOUND_TOP:
+            return None
+        rects = self._text_rects(self._project)
+        for i, rect in enumerate(rects):  # 누른 칸 안에서 먼저
+            if rect.adjusted(-2, 0, 2, 0).contains(QPointF(x, y)):
+                return i
+        for i, rect in enumerate(rects):  # 칸이 얇으면 위아래로 조금 비켜 눌러도
+            if rect.adjusted(-2, -4, 2, 4).contains(QPointF(x, y)):
+                return i
+        return None
+
+    def _text_part(self, index: int, x: float) -> str:
+        rect = self._text_rects(self._project)[index]
+        if rect.width() > 3 * EDGE_PX:
+            if x - rect.left() <= EDGE_PX:
+                return "left"
+            if rect.right() - x <= EDGE_PX:
+                return "right"
+        return "body"
+
+    def _text_dragged(self, x: float) -> Project:
+        """글자 블록을 x까지 끈 모양: 몸통은 옮기기, 양 끝은 시작·끝 (재생 헤드·클립 끝에 달라붙는다)."""
+        drag, project = self._drag, self._project
+        item, fps = project.texts[drag["index"]], project.fps
+        moved = (x - drag["x0"]) / self._ppf
+        start, end = item.start * fps, item.end * fps
+        if drag["part"] == "body":
+            moved += self._snap_shift([start + moved, end + moved], None)
+            shift = max(-item.start, moved / fps)
+            changed = replace(item, start=item.start + shift, end=item.end + shift)
+        elif drag["part"] == "left":
+            moved += self._snap_shift([start + moved], None)
+            changed = replace(item, start=max(0.0, min((start + moved) / fps, item.end - MIN_CUE)))
+        else:
+            moved += self._snap_shift([end + moved], None)
+            changed = replace(item, end=max((end + moved) / fps, item.start + MIN_CUE))
+        texts = (*project.texts[: drag["index"]], changed, *project.texts[drag["index"] + 1 :])
+        return replace(project, texts=tuple(sorted(texts, key=lambda t: (t.start, t.end))))
+
+    def _sound_rect(self, project: Project, sound) -> QRectF:
+        x0 = self._x(sound.start)
+        x1 = self._x(sound.start + sound.length_ms * project.fps / 1000)
+        return QRectF(x0, SOUND_TOP + 2, max(3.0, x1 - x0), SOUND_H - 4)
+
+    def _paint_sounds(self, painter: QPainter, project: Project) -> None:
+        """소리 띠: 배경 음악(초록)·떼어 낸 소리(주황) 조각. 끌어 옮기고 양 끝을 끌어 자른다."""
+        painter.fillRect(QRectF(HEADER_W, SOUND_TOP, self.width(), SOUND_H), QColor("#121417"))
+        for sound in project.sounds:
+            rect = self._sound_rect(project, sound)
+            if rect.right() < HEADER_W or rect.left() > self.width():
+                continue
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#3f8f5a") if sound.duck else QColor("#a8672a"))
+            painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(rect.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter, Path(sound.source).name)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _sound_at(self, x: float, y: float) -> int | None:
+        if not SOUND_TOP <= y < RULER_H:
+            return None
+        for i, sound in enumerate(self._project.sounds):
+            if self._sound_rect(self._project, sound).adjusted(-2, -3, 2, 3).contains(QPointF(x, y)):
+                return i
+        return None
+
+    def _sound_part(self, index: int, x: float) -> str:
+        rect = self._sound_rect(self._project, self._project.sounds[index])
+        if rect.width() > 3 * EDGE_PX:
+            if x - rect.left() <= EDGE_PX:
+                return "left"
+            if rect.right() - x <= EDGE_PX:
+                return "right"
+        return "body"
+
+    def _sound_dragged(self, x: float) -> Project:
+        """소리 조각을 x까지 끈 모양: 몸통은 옮기기, 왼쪽 끝은 앞을 자르기(원본 위치도 같이), 오른쪽 끝은 길이."""
+        drag, project = self._drag, self._project
+        sound, fps = project.sounds[drag["index"]], project.fps
+        moved = (x - drag["x0"]) / self._ppf
+        end = sound.start + sound.length_ms * fps / 1000
+        if drag["part"] == "body":
+            moved += self._snap_shift([sound.start + moved, end + moved], None)
+            changed = replace(sound, start=max(0, round(sound.start + moved)))
+        elif drag["part"] == "left":
+            moved += self._snap_shift([sound.start + moved], None)
+            shift_ms = round(moved * 1000 / fps)
+            shift_ms = max(-sound.in_ms, -sound.start * 1000 // fps, min(shift_ms, sound.length_ms - MIN_SOUND_MS))
+            changed = replace(sound, start=sound.start + round(shift_ms * fps / 1000), in_ms=sound.in_ms + shift_ms,
+                              length_ms=sound.length_ms - shift_ms)
+        else:
+            moved += self._snap_shift([end + moved], None)
+            changed = replace(sound, length_ms=max(MIN_SOUND_MS, sound.length_ms + round(moved * 1000 / fps)))
+        sounds = (*project.sounds[: drag["index"]], changed, *project.sounds[drag["index"] + 1 :])
+        return replace(project, sounds=tuple(sorted(sounds, key=lambda s: s.start)))
+
     def _caption_at(self, x: float, y: float) -> int | None:
-        if not TICKS_H <= y < RULER_H:
+        if not TICKS_H <= y < TEXT_TOP:
             return None
         project = self._project
         for i, cue in enumerate(project.subtitles.cues):
@@ -604,6 +748,16 @@ class TimelineWidget(QWidget):
             elif ADD_BUTTON.contains(QPointF(x, y)):
                 self.edited.emit(add_track(self._project, self._project.video_tracks + 1))
             return
+        sound = self._sound_at(x, y)
+        if sound is not None:  # 소리 조각: '소리' 탭에서 고르고, 끌면 옮기기·자르기
+            self.sound_clicked.emit(self._project.sounds[sound].id)
+            self._drag = {"kind": "sound-press", "index": sound, "part": self._sound_part(sound, x), "x0": x, "y0": y}
+            return
+        text = self._text_at(x, y)
+        if text is not None:  # 글자 블록: '글자' 탭에서 고르고, 끌면 옮기기·길이 바꾸기 (그냥 떼면 그 글자 시작으로)
+            self.text_clicked.emit(self._project.texts[text].id)
+            self._drag = {"kind": "text-press", "index": text, "part": self._text_part(text, x), "x0": x, "y0": y}
+            return
         caption = self._caption_at(x, y)
         if caption is not None:  # 자막 블록: '자막' 탭에서 그 줄을 고르고, 끌면 옮기기·길이 바꾸기 (그냥 떼면 그 자막으로 간다)
             self.caption_clicked.emit(caption)
@@ -636,6 +790,12 @@ class TimelineWidget(QWidget):
             caption = self._caption_at(x, y)
             if caption is not None:
                 edge = self._caption_part(caption, x) != "body"
+            sound = self._sound_at(x, y)
+            if sound is not None:
+                edge = self._sound_part(sound, x) != "body"
+            text = self._text_at(x, y)
+            if text is not None:
+                edge = self._text_part(text, x) != "body"
             self.setCursor(Qt.CursorShape.SizeHorCursor if edge else Qt.CursorShape.ArrowCursor)
             button = self._header_hit(x, y)
             tips = {"hide": "화면 숨기기/보이기 (소리는 그대로)", "mute": "소리 끄기/켜기 (화면은 그대로)"}
@@ -647,6 +807,18 @@ class TimelineWidget(QWidget):
                 self.setToolTip("")
             return
         kind = self._drag["kind"]
+        if kind == "text-press" and abs(x - self._drag["x0"]) >= DRAG_START_PX:
+            self._drag["kind"] = kind = "text-drag"
+        if kind == "text-drag":
+            self._draft = self._text_dragged(x)
+            self.update()
+            return
+        if kind == "sound-press" and abs(x - self._drag["x0"]) >= DRAG_START_PX:
+            self._drag["kind"] = kind = "sound-drag"
+        if kind == "sound-drag":
+            self._draft = self._sound_dragged(x)
+            self.update()
+            return
         if kind == "caption-press" and abs(x - self._drag["x0"]) >= DRAG_START_PX:
             self._drag["kind"] = kind = "caption-drag"
         if kind == "caption-drag":
@@ -680,7 +852,7 @@ class TimelineWidget(QWidget):
             elif placed.track != MAIN_TRACK:
                 moved += self._snap_shift([placed.start + moved], clip.id)
             # 타임라인 프레임 → 원본 프레임 (원본 fps가 다를 수 있다)
-            delta = round(moved * clip.fps / self._project.fps)
+            delta = round(moved * clip.fps * clip.speed / self._project.fps)  # 속도를 바꾼 클립은 원본이 그만큼 더 지나간다
             trimmed = self._trimmed(clip, delta, kind)
             if trimmed is not self._project:  # 위 줄에서 옆 클립과 겹치면 거부됨 → 마지막으로 된 모양 유지
                 self._draft = trimmed
@@ -702,7 +874,9 @@ class TimelineWidget(QWidget):
             return
         if drag["kind"] == "caption-press":  # 끌지 않고 뗐다 → 그 자막 시작으로
             self.seek_requested.emit(round(self._project.subtitles.cues[drag["index"]].start * self._project.fps))
-        elif drag["kind"] == "caption-drag" and self._draft is not None:
+        elif drag["kind"] == "text-press":
+            self.seek_requested.emit(round(self._project.texts[drag["index"]].start * self._project.fps))
+        elif drag["kind"] in ("caption-drag", "sound-drag", "text-drag") and self._draft is not None:
             self.edited.emit(self._draft)
         if drag["kind"] == "empty":  # 끌지 않고 뗐다 → 재생 헤드 이동, 선택 해제
             if not drag["adding"]:

@@ -40,10 +40,10 @@ def timeline_ranges(project: Project, spans_by_clip: dict[str, list[tuple[float,
         if placed.track != MAIN_TRACK or clip.id not in spans_by_clip:
             continue
         # 클립 안 위치 L에서 들리는 소리 = 원본 오디오 시각 source_time(L) - 오프셋 → 거꾸로 풀면 L
-        base = clip.in_frame / clip.fps - clip.audio_offset_ms / 1000
+        offset = clip.audio_offset_ms / 1000
         for lo, hi in spans_by_clip[clip.id]:
-            a = max(0, round((lo - base) * project.fps))
-            b = min(placed.end - placed.start, round((hi - base) * project.fps))
+            a = max(0, round(project.local_of(clip, lo + offset)))
+            b = min(placed.end - placed.start, round(project.local_of(clip, hi + offset)))
             if a < b:
                 ranges.append((placed.start + a, placed.start + b))
     merged: list[tuple[int, int]] = []

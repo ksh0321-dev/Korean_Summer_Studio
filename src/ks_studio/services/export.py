@@ -12,6 +12,8 @@ from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
 from ks_studio.services.render import TimelineRenderer
 from ks_studio.services.sources import AUDIO_RATE, SourceCache
+from ks_studio.services.accel import hardware_encoders
+from ks_studio.services.optimize import video_encoder
 
 VIDEO_OPTIONS = {"preset": "p5", "rc": "vbr", "bf": "0"}
 VIDEO_MBPS_AT_30FPS = (16, 20)  # (평균, 최대). fps에 비례해 올린다
@@ -35,7 +37,11 @@ def export_project(
     with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as container:
         average, peak = (round(mbps * fps / 30) for mbps in VIDEO_MBPS_AT_30FPS)
         options = {**VIDEO_OPTIONS, "b": f"{average}M", "maxrate": f"{peak}M", "g": str(fps)}
-        video = container.add_stream("h264_nvenc", rate=fps, options=options)
+        # NVIDIA(NVENC) → 맥(VideoToolbox) → CPU(libx264) 중 되는 것 (NVIDIA가 없는 PC·맥에서도 돈다)
+        candidates = (("h264_nvenc", options), *hardware_encoders("h264", f"{average}M"),
+                      ("libx264", {"preset": "veryfast", "crf": "18", "g": str(fps)}))
+        name, chosen = video_encoder(size, fps, candidates)
+        video = container.add_stream(name, rate=fps, options=chosen)
         video.width, video.height = size
         video.pix_fmt = "yuv420p"
         video.time_base = Fraction(1, fps)

@@ -7,8 +7,6 @@
 휴대폰 영상처럼 편집용 사본이 필요한 미디어는 상태를 한 줄 더 보여 주고, 사본이 준비될 때까지 넣을 수 없다.
 """
 
-import os
-import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -27,18 +25,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ks_studio.services.accel import open_folder
 from ks_studio.services.sources import SourceCache
 from ks_studio.ui.editor.timeline import MIME_MEDIA, format_frames
 
 VIDEO_FILTER = "영상 (*.mp4 *.mov *.mkv *.m4v *.avi *.webm)"
+MEDIA_FILTER = "영상·사진 (*.mp4 *.mov *.mkv *.m4v *.avi *.webm *.jpg *.jpeg *.png *.webp *.bmp)"  # 사진은 5초 영상으로
 
 
 def show_in_explorer(path: Path) -> None:
-    """탐색기로 그 파일이 있는 폴더를 열고 파일을 골라 둔다 (파일이 없으면 폴더만)."""
-    if path.exists():
-        subprocess.Popen(["explorer", "/select,", str(path.resolve())])
-    elif path.parent.exists():
-        os.startfile(path.parent)
+    """탐색기(맥은 Finder)로 그 파일이 있는 폴더를 열고 파일을 골라 둔다 (파일이 없으면 폴더만)."""
+    if path.exists() or path.parent.exists():
+        open_folder(path, select=True)
 
 
 @dataclass(frozen=True)
@@ -185,7 +183,7 @@ class MediaBin(QWidget):
         menu.exec(self.list.mapToGlobal(pos))
 
     def _choose_files(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(self, "미디어 가져오기", "", VIDEO_FILTER)
+        files, _ = QFileDialog.getOpenFileNames(self, "미디어 가져오기", "", MEDIA_FILTER)
         if files:
             self.import_requested.emit([Path(f) for f in files])
 

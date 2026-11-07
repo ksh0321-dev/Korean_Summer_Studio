@@ -91,16 +91,13 @@ class BodyAnalyzer:
     def _load(self):
         with self._lock:
             if self._parts is None:
-                import onnxruntime
                 from rtmlib import RTMPose
 
-                if hasattr(onnxruntime, "preload_dlls"):
-                    onnxruntime.preload_dlls()  # pip로 깐 CUDA·cuDNN DLL을 먼저 찾아 둔다 (없으면 CUDA 세션이 안 열렸다 — 실측)
-                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                self._parts = onnxruntime.InferenceSession(str(self._folder / PARTS_FILE), providers=providers)
-                cuda = "CUDAExecutionProvider" in self._parts.get_providers()
+                from ks_studio.services.accel import device_name, onnx_session
+
+                self._parts = onnx_session(self._folder / PARTS_FILE)  # NVIDIA: CUDA · 맥: Core ML · 없으면 CPU
                 self._pose = RTMPose(str(self._folder / POSE_FILE), model_input_size=(192, 256), backend="onnxruntime",
-                                     device="cuda" if cuda else "cpu")
+                                     device=device_name(self._parts.get_providers()))
         return self._parts, self._pose
 
     def parts(self, rgb: np.ndarray) -> np.ndarray:

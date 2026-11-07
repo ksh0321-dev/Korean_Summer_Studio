@@ -19,6 +19,7 @@ CAPTION_BOTTOM_MAX = 0.85
 
 class VideoView(QWidget):
     caption_moved = Signal(float)  # 자막을 끌어 놓은 자리: 아래 여백 (화면 높이 비율)
+    text_moved = Signal(str, float, float)  # 글자를 끌어 놓은 자리: 글자 id, 가운데 (가로, 세로) 화면 비율
 
     def __init__(self, mirrored: bool = True, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -36,11 +37,26 @@ class VideoView(QWidget):
         self._caption_drag: list | None = None  # [잡은 곳에서 자막 아래끝까지, 지금 아래 여백]
         self._caption_draggable = False
         self._safe = False
+        self._texts: list[tuple] = []  # (id, 글, CaptionStyle, x, y, 진하기) — 지금 보이는 화면 글자
+        self._text_rects: dict[str, QRectF] = {}
+        self._text_drag: list | None = None  # [id, 잡은 곳에서 가운데까지 (dx, dy), 지금 (x, y)]
 
     def set_caption_draggable(self, on: bool) -> None:
         """자막을 위아래로 끌어 자리를 바꿀 수 있게 (편집 화면)."""
         self._caption_draggable = on
         self.setMouseTracking(on)
+
+    def set_texts(self, texts: list[tuple]) -> None:
+        """지금 보이는 화면 글자들 (id, 글, 모양, 가운데 x, y)."""
+        if texts != self._texts:
+            self._texts = texts
+            self.update()
+
+    def text_hit(self, pos) -> str | None:
+        """pos(위젯 좌표) 위의 화면 글자 id."""
+        if not self._caption_draggable:
+            return None
+        return next((text_id for text_id, rect in self._text_rects.items() if rect.contains(pos)), None)
 
     def set_safe_zone(self, on: bool) -> None:
         """세로 영상에서 숏폼 앱 화면이 덮는 곳을 어둡게 보인다 (자막·글을 그 안쪽에 두게)."""
@@ -125,6 +141,18 @@ class VideoView(QWidget):
             self._caption_rect = paint_caption(painter, QRectF(target), text, style, self._image.width(), self._image.height(), second)
         else:
             self._caption_rect = None
+        self._text_rects = {}
+        if self._texts:
+            from ks_studio.services.captions import paint_text
+
+            for text_id, text, style, x, y, opacity in self._texts:
+                if self._text_drag is not None and self._text_drag[0] == text_id:
+                    x, y = self._text_drag[2]
+                painter.setOpacity(opacity)  # 페이드 인·아웃
+                rect = paint_text(painter, QRectF(target), text, style, x, y, self._image.width(), self._image.height())
+                painter.setOpacity(1.0)
+                if rect is not None:
+                    self._text_rects[text_id] = rect
         if self._safe and self._image.height() > self._image.width():
             self._paint_safe_zone(painter, target)
 
@@ -176,6 +204,12 @@ class VideoView(QWidget):
 
     def mousePressEvent(self, event) -> None:
         y = event.position().y()
+        text_id = self.text_hit(event.position()) if event.button() == Qt.MouseButton.LeftButton else None
+        if text_id is not None:  # 글자가 자막 위에 겹쳐도 글자 먼저
+            rect = self._text_rects[text_id]
+            current = next((x, y) for i, _t, _s, x, y, _o in self._texts if i == text_id)
+            self._text_drag = [text_id, (rect.center().x() - event.position().x(), rect.center().y() - y), current]
+            return
         if (self._caption_draggable and event.button() == Qt.MouseButton.LeftButton and self._caption_rect is not None
                 and self._caption_rect.contains(event.position())):
             self._caption_drag = [self._caption_rect.bottom() - y, self._caption[1].bottom]
@@ -184,6 +218,15 @@ class VideoView(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         y = event.position().y()
+        if self._text_drag is not None:
+            target = self.image_rect()
+            if target.width() > 0:
+                cx = event.position().x() + self._text_drag[1][0]
+                cy = y + self._text_drag[1][1]
+                self._text_drag[2] = (min(1.0, max(0.0, (cx - target.left()) / target.width())),
+                                      min(1.0, max(0.0, (cy - target.top()) / target.height())))
+                self.update()
+            return
         if self._caption_drag is not None:
             target = self.image_rect()
             bottom_px = y + self._caption_drag[0]
@@ -192,11 +235,19 @@ class VideoView(QWidget):
             return
         if self._caption_draggable:
             over = self._caption_rect is not None and self._caption_rect.contains(event.position())
-            self.setCursor(Qt.CursorShape.SizeVerCursor if over else Qt.CursorShape.ArrowCursor)
-            self.setToolTip("위아래로 끌어 자막 자리 바꾸기" if over else "")
+            on_text = self.text_hit(event.position()) is not None
+            self.setCursor(Qt.CursorShape.SizeAllCursor if on_text else Qt.CursorShape.SizeVerCursor if over else Qt.CursorShape.ArrowCursor)
+            self.setToolTip("끌어 글자 자리 바꾸기" if on_text else "위아래로 끌어 자막 자리 바꾸기" if over else "")
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._text_drag is not None:
+            text_id, _offset, (x, y) = self._text_drag
+            self._text_drag = None
+            self._texts = [(i, t, s, x, y, o) if i == text_id else (i, t, s, ox, oy, o) for i, t, s, ox, oy, o in self._texts]
+            self.update()
+            self.text_moved.emit(text_id, round(x, 3), round(y, 3))
+            return
         if self._caption_drag is not None:
             bottom = round(self._caption_drag[1], 3)
             self._caption_drag = None

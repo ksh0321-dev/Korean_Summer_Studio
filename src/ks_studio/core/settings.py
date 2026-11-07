@@ -71,6 +71,14 @@ class AppSettings:
     recent_projects: list[str] = field(default_factory=list)  # 최근에 연 프로젝트 폴더, 최신 순
     sync_calibrations: list[SyncCalibration] = field(default_factory=list)
     shortcuts: dict[str, list[str]] = field(default_factory=dict)  # 컷편집 단축키 중 바꾼 것만: 동작 이름 → 키 (빈 목록 = 없음)
+    # 성능
+    preview_quality: str = "1080"  # 재생 중 미리보기 최대 크기: PREVIEW_QUALITIES 키
+    software_encoding: bool = False  # 내보내기·AI 보정·최적화를 CPU 인코더로만 (그래픽 드라이버 문제가 있을 때)
+    # 새 프로젝트 기본값
+    default_caption_style: str = ""  # 새 프로젝트의 자막 모양 프리셋 이름 ("" = 기본 모양)
+    default_export_preset: str = ""  # 내보내기 탭을 처음 열 때 고를 프리셋 키 ("" = 직접 고르기)
+    # 프로그램
+    check_updates: bool = True  # 켤 때 새 버전이 있는지 GitHub에서 확인
 
     @property
     def sync_calibration(self) -> SyncCalibration | None:
@@ -93,10 +101,19 @@ class AppSettings:
             )
             for c in data.get("sync_calibrations", [])
         ]
-        return cls(**data)
+        known = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in data.items() if k in known})  # 새 버전에서 만든 설정을 옛 버전이 열어도 된다
 
     def save(self, path: Path) -> None:
         write_json_atomic(path, asdict(self))
+
+
+PREVIEW_QUALITIES = {  # 재생 중 미리보기 최대 크기 (멈춘 장면은 늘 화면 칸 크기 그대로)
+    "1080": ("1080p (기본)", (1920, 1080)),
+    "720": ("720p (가벼움 — 재생이 끊기면)", (1280, 720)),
+    "540": ("540p (아주 가벼움)", (960, 540)),
+    "full": ("제한 없음 (4K 모니터·빠른 PC)", (7680, 4320)),
+}
 
 
 def with_recent_project(recent: list[str], folder: str) -> list[str]:

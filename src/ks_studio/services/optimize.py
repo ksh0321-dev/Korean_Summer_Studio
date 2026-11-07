@@ -27,6 +27,8 @@ from itertools import islice
 from pathlib import Path
 
 import av
+
+from ks_studio.services.accel import hardware_encoders
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
@@ -48,6 +50,7 @@ VFR_IRREGULAR_RATIO = 0.01
 # b=0·maxrate를 풀지 않으면 NVENC가 평균 비트레이트 기본값에 묶여 cq가 먹지 않는다 (실측).
 ENCODERS = (
     ("hevc_nvenc", {"preset": "p5", "rc": "vbr", "cq": "22", "b": "0", "maxrate": "200M", "bufsize": "400M", "bf": "3"}),
+    *hardware_encoders("hevc", "60M"),  # 맥 (Apple Silicon)
     ("libx264", {"preset": "veryfast", "crf": "20"}),  # CPU: H.265(libx265)는 4K에서 너무 느리다
 )
 KEYFRAME_SECONDS = 1.0  # 키프레임 간격 (편집 미리보기에서 찾아가기 · 크기 사이 절충)
@@ -262,8 +265,16 @@ def add_video_stream(dst, size: tuple[int, int], rate, encoders: tuple = ENCODER
     return stream
 
 
-def video_encoder(size: tuple[int, int], fps: float, encoders: tuple = ENCODERS) -> tuple[str, dict[str, str]]:
-    """먼저 열어 보고 되는 인코더를 차례로 고른다 (GPU → CPU). 기본은 고화질 H.264 (AI 보정본도 같이 쓴다)."""
+def video_encoder(size: tuple[int, int], fps: float, encoders: tuple = ENCODERS,
+                  software_ok: bool = True) -> tuple[str, dict[str, str]]:
+    """먼저 열어 보고 되는 인코더를 차례로 고른다 (GPU → CPU). 기본은 고화질 H.264 (AI 보정본도 같이 쓴다).
+
+    설정에서 'CPU 인코더로만'을 켰으면 GPU 인코더를 건너뛴다 (software_ok=False인 녹화는 빼고 — 녹화는 실시간이라 GPU가 낫다).
+    """
+    from ks_studio.services import accel
+
+    if software_ok and accel.SOFTWARE_ENCODING and any(n.startswith("lib") for n, _ in encoders):
+        encoders = tuple(e for e in encoders if e[0].startswith("lib"))
     for name, options in encoders:
         try:
             ctx = av.CodecContext.create(name, "w")
@@ -273,7 +284,7 @@ def video_encoder(size: tuple[int, int], fps: float, encoders: tuple = ENCODERS)
             ctx.options = dict(options)
             ctx.open()
             return name, options
-        except av.FFmpegError:
+        except (av.FFmpegError, ValueError):  # ValueError: 이 FFmpeg에 없는 인코더 (윈도의 videotoolbox, 맥의 nvenc)
             log.info("%s를 쓸 수 없어 다음 인코더로", name)
     raise RuntimeError(f"영상 인코더를 열 수 없습니다 ({', '.join(name for name, _ in encoders)})")
 
