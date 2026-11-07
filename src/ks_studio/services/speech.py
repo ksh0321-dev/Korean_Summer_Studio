@@ -1,5 +1,9 @@
 """음성 → 자막 (faster-whisper large-v3, GPU). 한국어로 말해도 영어 자막으로 옮길 수 있다 (task="translate").
 
+- 단어별 시간까지 받아서 자막 줄을 짧게 나눈다 (core.subtitles.split_words — 숏폼 세로 화면에 1~2줄)
+- 두 줄 자막(task="bilingual"): 한국어로 받아 나눈 뒤, 줄마다 그 구간 소리만 다시 '영어로' 돌린다 → 시간이 딱 맞는 번역.
+  문장 통째로 번역한 것과 견줘도 뜻은 비슷했다 (실측). 다만 Whisper 번역은 고유명사·음식 이름에 약하다 (곶감 → piece of cake)
+
 - 모델은 처음 쓸 때 프로젝트 models/whisper/에 내려받는다 (약 3GB, 저장소에 올리지 않음)
 - NVIDIA GPU가 없으면 CPU(int8)로 — 느리지만 된다
 - 실측 (RTX 5080): 모델 열기 3초(내려받은 뒤), 갤럭시 13초 영상 번역 0.8초
@@ -18,7 +22,8 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from ks_studio.app.paths import MODELS_DIR
-from ks_studio.core.subtitles import Cue
+from ks_studio.core.glossary import speech_hint, translation_hint
+from ks_studio.core.subtitles import Cue, Word, split_words
 
 log = logging.getLogger(__name__)
 
@@ -99,17 +104,42 @@ def resample_48k(audio: np.ndarray) -> np.ndarray:
     return resample_poly(audio.astype(np.float32), 1, 3).astype(np.float32)
 
 
-def clean(segments, duration: float) -> list[Cue]:
-    """faster-whisper 구간 → 자막 줄. 빈 글, 영상 끝 뒤, 바로 앞과 같은 문장(지어낸 반복)은 버린다."""
-    cues: list[Cue] = []
-    for start, end, text in segments:
+TRANSLATE_PAD = 0.2  # 줄을 번역할 때 앞뒤로 이만큼 소리를 더 준다 (첫·끝 음절이 잘리지 않게)
+
+
+def segment_words(segments, duration: float) -> list[Word]:
+    """faster-whisper 구간 [(시작, 끝, 글, [(시작, 끝, 단어), ...]), ...] → 단어들.
+
+    빈 글, 영상 끝 뒤, 바로 앞과 같은 문장(음악 구간에서 지어낸 반복)은 버린다. 단어 시간이 없는 구간은 통째로 한 단어.
+    """
+    words: list[Word] = []
+    previous = None
+    for start, end, text, seg_words in segments:
         text = text.strip()
-        if not text or start >= duration:
+        if not text or start >= duration or text == previous:
             continue
-        if cues and cues[-1].text == text:
-            continue
-        cues.append(Cue(round(start, 2), round(min(end, duration), 2), text))
-    return cues
+        previous = text
+        found = [Word(round(a, 3), round(min(b, duration), 3), w) for a, b, w in seg_words if w.strip() and a < duration]
+        words += found or [Word(round(start, 3), round(min(end, duration), 3), " " + text)]
+    return words
+
+
+def cues_from_segments(segments, duration: float, line_chars: int = 16, max_lines: int = 2) -> list[Cue]:
+    return split_words(segment_words(segments, duration), line_chars, max_lines)
+
+
+def translate_span(model, audio: np.ndarray, start: float, end: float, language: str | None, hint: str | None = None) -> str:
+    """audio의 [start, end] 구간만 영어로 (두 줄 자막의 둘째 줄).
+
+    앞 줄 번역을 이어 주는 말(initial_prompt)로 줬더니 그 말을 되풀이했다 ("How is it? Isn't it pretty?" — 실측) → 쓰지 않는다.
+    hint = 용어집에서 이 줄에 나오는 낱말의 영어 (곶감 → dried persimmon).
+    """
+    clip = audio[max(0, int((start - TRANSLATE_PAD) * SAMPLE_RATE)) : int((end + TRANSLATE_PAD) * SAMPLE_RATE)]
+    if len(clip) < SAMPLE_RATE // 10:
+        return ""
+    segments, _info = model.transcribe(clip, task="translate", language=language, vad_filter=False, without_timestamps=True,
+                                       condition_on_previous_text=False, hotwords=hint)
+    return " ".join(s.text.strip() for s in segments).strip()
 
 
 class SpeechWorker(QObject):
@@ -127,10 +157,13 @@ class SpeechWorker(QObject):
         self.busy_with: Path | None = None
         threading.Thread(target=self._worker, daemon=True, name="speech").start()
 
-    def request(self, path: Path, task: str, audio_fn=None) -> None:
-        """path의 소리를 알아듣는다. audio_fn을 주면 그 함수가 돌려준 소리(48kHz 모노 float32)로 (컷편집 타임라인)."""
+    def request(self, path: Path, task: str, audio_fn=None, layout: tuple[int, int] = (16, 2), terms=()) -> None:
+        """path의 소리를 알아듣는다. audio_fn을 주면 그 함수가 돌려준 소리(48kHz 모노 float32)로 (컷편집 타임라인).
+
+        layout = (한 줄 글자 수, 줄 수) — 자동 줄 나누기. terms = 용어집 (받아쓰기·번역 힌트).
+        """
         self.busy_with = path
-        self._jobs.put((path, task, audio_fn))
+        self._jobs.put((path, task, audio_fn, layout, tuple(terms)))
 
     def _load(self, path: Path):
         if self._model is None:
@@ -148,7 +181,7 @@ class SpeechWorker(QObject):
 
     def _worker(self) -> None:
         while True:
-            path, task, audio_fn = self._jobs.get()
+            path, task, audio_fn, layout, terms = self._jobs.get()
             try:
                 model = self._load(path)
                 self.status.emit(path, "소리 읽는 중…")
@@ -157,13 +190,26 @@ class SpeechWorker(QObject):
                 if duration == 0:
                     raise RuntimeError("소리가 없는 영상입니다")
                 self.status.emit(path, "말 알아듣는 중…")
-                segments, _info = model.transcribe(audio, task=task, vad_filter=True, condition_on_previous_text=False)
+                bilingual = task == "bilingual"
+                share = 0.5 if bilingual else 1.0  # 두 줄 자막은 번역이 나머지 절반
+                english = task == "translate"
+                hint = (", ".join(t.english for t in terms if t.english) or None) if english else speech_hint(terms)
+                segments, info = model.transcribe(audio, task="translate" if english else "transcribe", hotwords=hint,
+                                                  vad_filter=True, condition_on_previous_text=False, word_timestamps=True)
                 found = []
                 for segment in segments:  # 하나씩 나오므로 진행률을 보여 줄 수 있다
-                    found.append((segment.start, segment.end, segment.text))
-                    self.progress.emit(path, min(1.0, segment.end / duration))
+                    found.append((segment.start, segment.end, segment.text,
+                                  [(w.start, w.end, w.word) for w in (segment.words or [])]))
+                    self.progress.emit(path, share * min(1.0, segment.end / duration))
+                cues = cues_from_segments(found, duration, *layout)
+                if bilingual and info.language != "en":  # 영어로 말했으면 번역할 것이 없다
+                    for i, cue in enumerate(cues):
+                        self.status.emit(path, f"영어로 옮기는 중… {i + 1}/{len(cues)}")
+                        translation = translate_span(model, audio, cue.start, cue.end, info.language, translation_hint(terms, cue.text))
+                        cues[i] = Cue(cue.start, cue.end, cue.text, translation, cue.words)
+                        self.progress.emit(path, share + (1 - share) * (i + 1) / len(cues))
                 self.busy_with = None
-                self.done.emit(path, clean(found, duration))
+                self.done.emit(path, cues)
             except Exception as e:
                 log.exception("음성 인식 실패: %s", path)
                 self.busy_with = None

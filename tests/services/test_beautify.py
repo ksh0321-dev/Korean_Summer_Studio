@@ -192,7 +192,7 @@ def test_lip_color_tints_lips_keeps_brightness_and_mouth_inside():
     out = apply(image, fake_face(), BeautySettings(lip=1.0))
     r, g, b = out[645, 500].astype(int)  # 아랫입술
     assert r > g + 20 and r > b
-    assert abs(cv2.cvtColor(out[645:646, 500:501], cv2.COLOR_RGB2LAB)[0, 0, 0] - cv2.cvtColor(image[:1, :1], cv2.COLOR_RGB2LAB)[0, 0, 0]) < 12
+    assert abs(int(cv2.cvtColor(out[645:646, 500:501], cv2.COLOR_RGB2LAB)[0, 0, 0]) - int(cv2.cvtColor(image[:1, :1], cv2.COLOR_RGB2LAB)[0, 0, 0])) < 12
     assert np.abs(out[623, 500].astype(int) - GRAY).max() <= 3  # 입 안쪽은 립 컬러가 아니다 (경계를 부드럽게 한 만큼만)
 
 
@@ -285,3 +285,17 @@ def test_side_by_side_clip_has_range_both_halves_and_sound(tmp_path):
     assert abs(left[y, x] - GRAY).max() < 8 and right[y, x, 0] > right[y, x, 2] + 10  # 오른쪽만 블러셔
     assert abs(float(audio_seconds) - 0.5) < 0.1  # 15장 = 0.5초
 
+
+
+def test_lip_colors_differ_and_gloss_brightens_lower_lip_center():
+    from ks_studio.core.beauty import LIP_COLORS, gloss_ellipse
+
+    lm = fake_face()
+    reds = {key: apply(canvas(), lm, BeautySettings(lip=1.0, lip_color=key))[645, 500].astype(int) for key in LIP_COLORS}
+    assert reds["red"][1] < reds["nude"][1] and reds["plum"][0] < reds["coral"][0]  # 색마다 다르다
+    painted = apply(canvas(), lm, BeautySettings(lip=1.0))
+    glossy = apply(canvas(), lm, BeautySettings(lip=1.0, lip_gloss=1.0))
+    sheen = gloss_ellipse(lm)
+    x, y = round(sheen.cx), round(sheen.cy)
+    assert glossy[y, x].astype(int).sum() > painted[y, x].astype(int).sum() + 30  # 아랫입술 가운데가 반짝
+    assert (glossy[50, 50] == painted[50, 50]).all()  # 입술 밖은 그대로

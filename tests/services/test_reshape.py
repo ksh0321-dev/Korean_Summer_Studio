@@ -144,3 +144,20 @@ def test_head_resegmentation_overrides_coarse_layer_in_its_box():
     assert alpha[400 // GRID, 400 // GRID] > 0.99  # 상자 가운데
     assert alpha[100 // GRID, 100 // GRID] == 0  # 상자 밖은 전체 분리 그대로
     assert 0 < alpha[400 // GRID, 205 // GRID] < 0.5  # 상자 가장자리는 서서히
+
+
+def test_only_target_person_is_reshaped():
+    """화면에 두 사람: 얼굴 자리를 준 사람만 사람 층으로 — 옆사람은 다리 길게에도 그대로."""
+    from ks_studio.services.reshape import only_person
+
+    image, person = torso_scene()
+    other = np.zeros((SIZE, SIZE), np.uint8)
+    other[300:1000, 40:200] = 1  # 왼쪽에 떨어져 선 다른 사람
+    image[other > 0] = (90, 160, 90)
+    image[698:703, 40:200] = (0, 0, 0)
+    parts = parts_of((person, CLOTHES), (other, CLOTHES))
+    alone = only_person(parts, SIZE, SIZE, near=(500, 300))
+    out = image.copy()
+    assert reshape(out, None, {"legs": 1.0}, BodyInfo(alone, keypoints()))
+    assert (out[:, :260] == image[:, :260]).all()  # 다른 사람은 그대로
+    assert (out[600:, 380:620] != image[600:, 380:620]).any()  # 보정할 사람은 바뀐다

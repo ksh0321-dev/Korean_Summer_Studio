@@ -15,6 +15,7 @@ V1은 자석식(빈틈 없음), 위 줄은 원하는 시간에 놓는다. 화면
 I/O 구간은 눈금자에 청록색 띠로, 줄 영역에는 옅은 음영으로 표시한다.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import QMenu, QScrollBar, QWidget
 
 from ks_studio.core.edits import add_track, move_clip, move_to, trim_clip
 from ks_studio.core.project import DEFAULT_VIDEO_TRACKS, MAIN_TRACK, MIN_VIDEO_TRACKS, Clip, Placed, Project
+from ks_studio.core.subtitles import MIN_CUE, move_cue, update_cue
 from ks_studio.core.workspace import Workspace
 from ks_studio.services.sources import SourceCache
 
@@ -68,7 +70,7 @@ class TimelineWidget(QWidget):
     track_toggled = Signal(int, str)  # 줄, "hide" 또는 "mute"
     track_delete_requested = Signal(int)  # 줄 (확인 창은 받는 쪽에서)
     clip_menu_requested = Signal(QPoint)  # 클립·빈 곳 우클릭 (화면 좌표). 메뉴는 편집 화면이 만든다
-    caption_clicked = Signal(int)  # 자막 띠에서 누른 자막 줄 번호
+    caption_clicked = Signal(int)  # 자막 띠에서 누른 자막 줄 번호 (끌어서 옮기기·길이 바꾸기는 edited로)
 
     def __init__(self, sources: SourceCache, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -383,7 +385,7 @@ class TimelineWidget(QWidget):
         return QRectF(x0, TICKS_H + 2, max(3.0, x1 - x0), CAPTION_H - 4)
 
     def _paint_captions(self, painter: QPainter, project: Project) -> None:
-        """자막 띠: 자막 줄마다 블록 (글은 들어가는 만큼). 누르면 그 자막으로 간다 — 고치기는 오른쪽 '자막' 탭."""
+        """자막 띠: 자막 줄마다 블록 (글은 들어가는 만큼). 누르면 그 자막으로 가고, 끌면 옮기고, 양 끝을 끌면 길이를 바꾼다."""
         painter.fillRect(QRectF(HEADER_W, TICKS_H, self.width(), CAPTION_H), QColor("#14141a"))
         font = painter.font()
         font.setPixelSize(11)
@@ -398,6 +400,34 @@ class TimelineWidget(QWidget):
             painter.setPen(QColor("#ffffff"))
             painter.drawText(rect.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter, cue.text)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _caption_part(self, index: int, x: float) -> str:
+        """자막 블록의 어디를 눌렀나: 왼쪽 끝·오른쪽 끝(길이 바꾸기) 또는 몸통(옮기기). 아주 짧은 블록은 몸통만."""
+        rect = self._caption_rect(self._project, self._project.subtitles.cues[index])
+        if rect.width() > 3 * EDGE_PX:
+            if x - rect.left() <= EDGE_PX:
+                return "left"
+            if rect.right() - x <= EDGE_PX:
+                return "right"
+        return "body"
+
+    def _caption_dragged(self, x: float) -> Project:
+        """자막 블록을 x까지 끈 모양 (재생 헤드·클립 끝에 달라붙는다)."""
+        drag, project = self._drag, self._project
+        fps, cue = project.fps, project.subtitles.cues[drag["index"]]
+        moved = (x - drag["x0"]) / self._ppf  # 타임라인 프레임
+        start, end = cue.start * fps, cue.end * fps
+        part = drag["part"]
+        if part == "body":
+            moved += self._snap_shift([start + moved, end + moved], None)
+            subs, _ = move_cue(project.subtitles, drag["index"], moved / fps)
+        elif part == "left":
+            moved += self._snap_shift([start + moved], None)
+            subs, _ = update_cue(project.subtitles, drag["index"], start=min((start + moved) / fps, cue.end - MIN_CUE))
+        else:
+            moved += self._snap_shift([end + moved], None)
+            subs, _ = update_cue(project.subtitles, drag["index"], end=max((end + moved) / fps, cue.start + MIN_CUE))
+        return replace(project, subtitles=subs)
 
     def _caption_at(self, x: float, y: float) -> int | None:
         if not TICKS_H <= y < RULER_H:
@@ -575,9 +605,9 @@ class TimelineWidget(QWidget):
                 self.edited.emit(add_track(self._project, self._project.video_tracks + 1))
             return
         caption = self._caption_at(x, y)
-        if caption is not None:  # 자막 블록: 그 자막 시작으로 가고 '자막' 탭에서 그 줄을 고른다
-            self.seek_requested.emit(round(self._project.subtitles.cues[caption].start * self._project.fps))
+        if caption is not None:  # 자막 블록: '자막' 탭에서 그 줄을 고르고, 끌면 옮기기·길이 바꾸기 (그냥 떼면 그 자막으로 간다)
             self.caption_clicked.emit(caption)
+            self._drag = {"kind": "caption-press", "index": caption, "part": self._caption_part(caption, x), "x0": x, "y0": y}
             return
         hit = self._hit(x, y)
         adding = bool(event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
@@ -603,6 +633,9 @@ class TimelineWidget(QWidget):
         if self._drag is None:
             hit = self._hit(x, y)
             edge = hit is not None and hit[1] != "body"
+            caption = self._caption_at(x, y)
+            if caption is not None:
+                edge = self._caption_part(caption, x) != "body"
             self.setCursor(Qt.CursorShape.SizeHorCursor if edge else Qt.CursorShape.ArrowCursor)
             button = self._header_hit(x, y)
             tips = {"hide": "화면 숨기기/보이기 (소리는 그대로)", "mute": "소리 끄기/켜기 (화면은 그대로)"}
@@ -614,6 +647,12 @@ class TimelineWidget(QWidget):
                 self.setToolTip("")
             return
         kind = self._drag["kind"]
+        if kind == "caption-press" and abs(x - self._drag["x0"]) >= DRAG_START_PX:
+            self._drag["kind"] = kind = "caption-drag"
+        if kind == "caption-drag":
+            self._draft = self._caption_dragged(x)
+            self.update()
+            return
         if kind == "scrub":
             self._seek_to_x(x)
         elif kind == "empty" and abs(x - self._drag["x0"]) + abs(y - self._drag["y0"]) >= DRAG_START_PX:
@@ -661,6 +700,10 @@ class TimelineWidget(QWidget):
         drop, self._drop = self._drop, None
         if drag is None:
             return
+        if drag["kind"] == "caption-press":  # 끌지 않고 뗐다 → 그 자막 시작으로
+            self.seek_requested.emit(round(self._project.subtitles.cues[drag["index"]].start * self._project.fps))
+        elif drag["kind"] == "caption-drag" and self._draft is not None:
+            self.edited.emit(self._draft)
         if drag["kind"] == "empty":  # 끌지 않고 뗐다 → 재생 헤드 이동, 선택 해제
             if not drag["adding"]:
                 self.select(None)

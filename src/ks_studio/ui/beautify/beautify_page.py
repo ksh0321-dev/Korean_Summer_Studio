@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QListView,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -38,11 +39,13 @@ from PySide6.QtWidgets import (
 )
 
 from ks_studio.app.paths import PRESETS_DIR
-from ks_studio.core.beauty import EYESHADOW_COLORS, AiState, BeautySettings, load_ai_state, save_ai_state
+from ks_studio.core.beauty import EYESHADOW_COLORS, LIP_COLORS, AiState, BeautySettings, load_ai_state, save_ai_state
 from ks_studio.core.presets import NAME_MAX, apply_preset, delete_preset, list_presets, load_preset, save_preset, valid_name
 from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
-from ks_studio.core.people import match
+from ks_studio.app.paths import PEOPLE_PATH
+from ks_studio.core.face_blur import BLUR_STYLES
+from ks_studio.core.people import load_registry, match, registered_name, save_registry
 from ks_studio.services.face import ai_unavailable_reason, people, pick_samples
 from ks_studio.services.optimize import Optimizer, inspect
 from ks_studio.services.sources import SourceCache, cache_name, optimized_path
@@ -63,17 +66,27 @@ EFFECT_TABS = (  # (탭, ((BeautySettings 칸, 이름), ...)) — 턱 길이만 
     ("얼굴형", (
         ("slim", "얼굴 갸름"), ("cheekbone", "광대 축소"), ("chin", "턱 길이 (−짧게 · +길게)"),
         ("eyes", "눈 키우기"), ("nose_slim", "콧볼 축소"), ("nose_length", "코 길이 줄이기"), ("smile", "웃는 입"),
-        ("face_small", "얼굴 작게"),  # 사람 분리 모델로 머리째 줄이고 드러난 배경만 메꾼다 (몸 모델 필요)
+        ("face_small", "얼굴 작게 [Beta]"),  # 사람 분리 모델로 머리째 줄이고 드러난 배경만 메꾼다 (몸 모델 필요)
     )),
-    ("몸매", (("waist", "허리 잘록"), ("shoulders", "어깨 좁게"), ("legs", "다리 길게"))),  # 몸의 점(RTMPose) + 사람 분리
+    ("몸매 [Beta]", (("waist", "허리 잘록"), ("shoulders", "어깨 좁게"), ("legs", "다리 길게"))),  # 몸의 점(RTMPose) + 사람 분리
     ("메이크업", (
         ("blush", "블러셔"), ("contour", "윤곽 (쉐딩·하이라이트)"), ("eyeshadow", "아이섀도"),
-        ("lip", "립 컬러"), ("teeth", "치아 미백"), ("eye_clear", "눈 또렷하게"),
+        ("lip", "립 컬러"), ("lip_gloss", "립 광택"), ("teeth", "치아 미백"), ("eye_clear", "눈 또렷하게"),
     )),
 )
 EFFECT_NAMES = {field: name for _, rows in EFFECT_TABS for field, name in rows}
 FILL_CHOICES = (("telea", "빠르게"), ("migan", "자연스럽게 (MI-GAN)"), ("lama", "무늬까지 (LaMa, 느림)"))  # services.inpaint.FILLS
 BIPOLAR = {"chin"}
+BETA = {"face_small", "waist", "shoulders", "legs"}  # 아직 다듬는 중 — 자세·옷·배경에 따라 흔적이 남을 수 있다
+BETA_NOTE = ("Beta 기능: 자세·옷·배경에 따라 경계에 흔적이 남거나 귀걸이·잔머리가 겹쳐 보일 수 있어요.\n"
+             "샘플 컷·1분 미리보기로 꼭 확인하세요. 허리는 팔이 몸에서 떨어진 자세에서 잘 됩니다.")
+
+
+def _swatch(rgb: tuple[int, int, int]) -> QIcon:
+    """색 고르기 칸에 보일 작은 색 견본."""
+    pixmap = QPixmap(14, 14)
+    pixmap.fill(QColor(*rgb))
+    return QIcon(pixmap)
 
 
 def _pixmap(rgb: np.ndarray) -> QPixmap:
@@ -96,7 +109,8 @@ class BeautifyPage(QWidget):
         self._samples: list = []
         self._probes: list = []  # 샘플 후보 장면들 (사람을 바꾸면 여기서 다시 고른다)
         self._people: list = []
-        self._preview: tuple | None = None  # (프레임, 원래 RGB, 랜드마크)
+        self._preview: tuple | None = None  # (프레임, 원래 RGB, 랜드마크, 모든 얼굴)
+        self.people_path = PEOPLE_PATH  # 등록한 사람 (얼굴을 흐리지 않을 사람, 앱 전체)
         self._unavailable = ai_unavailable_reason()
         self.worker = None
         self.renderer = None
@@ -135,12 +149,26 @@ class BeautifyPage(QWidget):
                 control.valueChanged.connect(self._on_effect_changed)
                 self.sliders[field] = control
                 form.addRow(name, control)
+                if field in BETA:  # 이름 칸에도 안내 (마우스를 올리면)
+                    form.labelForField(control).setToolTip(BETA_NOTE)
+                    control.setToolTip(BETA_NOTE)
                 if field == "eyeshadow":
                     self.shadow_color = QComboBox()
                     for key, (label, _rgb) in EYESHADOW_COLORS.items():
-                        self.shadow_color.addItem(label, key)
+                        self.shadow_color.addItem(_swatch(_rgb), label, key)
                     self.shadow_color.currentIndexChanged.connect(self._on_effect_changed)
                     form.addRow("아이섀도 색", self.shadow_color)
+                if field == "lip":
+                    self.lip_color = QComboBox()
+                    for key, (label, _rgb) in LIP_COLORS.items():
+                        self.lip_color.addItem(_swatch(_rgb), label, key)
+                    self.lip_color.currentIndexChanged.connect(self._on_effect_changed)
+                    form.addRow("립 색", self.lip_color)
+            if any(field in BETA for field, _ in rows) and all(field in BETA for field, _ in rows):  # 전부 Beta인 탭엔 안내 글
+                note = QLabel(BETA_NOTE)
+                note.setWordWrap(True)
+                note.setStyleSheet("color: #b26a00;")
+                form.addRow(note)
             tabs.addTab(page, title)
         self.presets_dir = PRESETS_DIR
         self.preset_combo = QComboBox()
@@ -167,7 +195,19 @@ class BeautifyPage(QWidget):
         fill_row.addWidget(self.fill_combo, 1)
         effects_layout = QVBoxLayout(effects)
         effects_layout.addWidget(tabs)
+        # 다른 사람 얼굴 흐리기: 주인공·'흐리지 않음'으로 고른 사람·등록한 사람만 빼고 (지나가는 사람 보호)
+        self.blur_check = QCheckBox("다른 사람 얼굴 흐리게")
+        self.blur_check.setToolTip("주인공과 '흐리지 않음'·'등록'한 사람(위 사람 목록에서 우클릭)만 빼고 모든 얼굴을 흐립니다")
+        self.blur_check.toggled.connect(self._on_effect_changed)
+        self.blur_style = QComboBox()
+        for key, label in BLUR_STYLES.items():
+            self.blur_style.addItem(label, key)
+        self.blur_style.currentIndexChanged.connect(self._on_effect_changed)
+        blur_row = QHBoxLayout()
+        blur_row.addWidget(self.blur_check)
+        blur_row.addWidget(self.blur_style, 1)
         effects_layout.addLayout(fill_row)
+        effects_layout.addLayout(blur_row)
         effects_layout.addLayout(preset_row)
         self.preview_check = QCheckBox("OK 뒤 미리보기 켜기 (느린 PC는 끄기)")
         self.preview_check.toggled.connect(self._on_preview_toggled)
@@ -205,7 +245,8 @@ class BeautifyPage(QWidget):
         self._scan_started = 0.0
         samples = QWidget()
         samples_layout = QVBoxLayout(samples)
-        samples_layout.addWidget(QLabel("보정할 사람 — 클릭해서 바꾸기 (처음엔 영상에 가장 많이 나온 사람)"))
+        samples_layout.addWidget(QLabel("보정할 사람 — 클릭해서 바꾸기 (처음엔 영상에 가장 많이 나온 사람) · "
+                                        "우클릭: 얼굴 흐리지 않기 · 사람 등록"))
         self.people_list = QListWidget()
         self.people_list.setViewMode(QListView.ViewMode.IconMode)
         self.people_list.setFlow(QListView.Flow.LeftToRight)
@@ -214,6 +255,8 @@ class BeautifyPage(QWidget):
         self.people_list.setIconSize(QSize(PERSON_ICON, PERSON_ICON))
         self.people_list.setFixedHeight(PERSON_ICON + 48)
         self.people_list.currentRowChanged.connect(self._on_person)
+        self.people_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.people_list.customContextMenuRequested.connect(self._person_menu)
         samples_layout.addWidget(self.people_list)
         samples_layout.addWidget(QLabel("샘플 컷 — 원본 · 적용 범위 · 적용 후. 슬라이더를 움직이면 바로 바뀝니다."))
         grid = QGridLayout()
@@ -509,12 +552,58 @@ class BeautifyPage(QWidget):
             probe = self._probes[person.probe]
             from ks_studio.ui.beautify.preview_render import face_crop
 
-            item = QListWidgetItem(QIcon(_pixmap(face_crop(probe.rgb, person.face.landmarks, PERSON_ICON))), f"{person.appearances}장면")
+            item = QListWidgetItem(QIcon(_pixmap(face_crop(probe.rgb, person.face.landmarks, PERSON_ICON))), self._person_label(person))
             self.people_list.addItem(item)
         target = self._settings().target_vector
         index = match([p.embedding for p in self._people], target) if target is not None else None
         self.people_list.setCurrentRow(index if index is not None else -1)
         self.people_list.blockSignals(False)
+
+    def _person_label(self, person) -> str:
+        """사람 칸 글: 몇 장면 · 등록한 이름 또는 '흐리지 않음'."""
+        name = registered_name(load_registry(self.people_path), person.embedding)
+        if name:
+            return f"{person.appearances}장면 · {name}"
+        if match(self._settings().keep_vectors, person.embedding) is not None:
+            return f"{person.appearances}장면 · 흐리지 않음"
+        return f"{person.appearances}장면"
+
+    def _person_menu(self, pos) -> None:
+        """사람 우클릭: 이 영상에서 흐리지 않기 · 등록하기(앱 전체) · 등록 해제."""
+        item = self.people_list.itemAt(pos)
+        if item is None:
+            return
+        person = self._people[self.people_list.row(item)]
+        registry = load_registry(self.people_path)
+        name = registered_name(registry, person.embedding)
+        keep = self._settings().keep_vectors
+        kept = match(keep, person.embedding)
+        menu = QMenu(self)
+        toggle = menu.addAction("이 영상에서 흐리기" if kept is not None else "이 영상에서 얼굴 흐리지 않기")
+        register = menu.addAction("등록 해제" if name else "사람 등록… (모든 영상에서 흐리지 않기)")
+        chosen = menu.exec(self.people_list.viewport().mapToGlobal(pos))
+        if chosen is toggle:
+            vectors = [tuple(float(x) for x in v) for v in keep]
+            if kept is not None:
+                vectors.pop(kept)
+            else:
+                vectors.append(tuple(float(x) for x in person.embedding))
+            self._set_settings(keep=tuple(vectors))
+        elif chosen is register:
+            if name:
+                registry = [(n, v) for n, v in registry if n != name]
+            else:
+                text, ok = QInputDialog.getText(self, "사람 등록", "이름 (모든 영상에서 이 사람 얼굴은 흐리지 않습니다):")
+                if not ok or not text.strip():
+                    return
+                registry.append((text.strip(), person.embedding.astype(np.float32)))
+            save_registry(self.people_path, registry)
+            self.message.emit(f"'{name or text.strip()}' {'등록 해제' if name else '등록'}", INFO)
+        else:
+            return
+        self._fill_people()
+        if self.center.currentIndex() == VIEW_PREVIEW:
+            self._show_preview()
 
     def _on_person(self, row: int) -> None:
         """다른 사람을 고르면 보정 대상이 바뀌므로 OK를 풀고 샘플부터 다시 확인한다."""
@@ -550,9 +639,14 @@ class BeautifyPage(QWidget):
             control.blockSignals(True)
             control.setValue(round(getattr(settings, field) * 100))
             control.blockSignals(False)
-        self.shadow_color.blockSignals(True)
-        self.shadow_color.setCurrentIndex(max(0, self.shadow_color.findData(settings.eyeshadow_color)))
-        self.shadow_color.blockSignals(False)
+        self.blur_check.blockSignals(True)
+        self.blur_check.setChecked(settings.blur_others)
+        self.blur_check.blockSignals(False)
+        for combo, value in ((self.shadow_color, settings.eyeshadow_color), (self.lip_color, settings.lip_color),
+                             (self.blur_style, settings.blur_style)):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(value)))
+            combo.blockSignals(False)
         self.fill_combo.blockSignals(True)
         self.fill_combo.setCurrentIndex(max(0, self.fill_combo.findData(settings.fill)))
         self.fill_combo.blockSignals(False)
@@ -624,7 +718,10 @@ class BeautifyPage(QWidget):
         self._set_settings(
             **{field: slider.value() / 100 for field, slider in self.sliders.items()},
             eyeshadow_color=self.shadow_color.currentData(),
+            lip_color=self.lip_color.currentData(),
             fill=self.fill_combo.currentData(),
+            blur_others=self.blur_check.isChecked(),
+            blur_style=self.blur_style.currentData(),
         )
         self._effect_timer.start()
 
@@ -704,9 +801,9 @@ class BeautifyPage(QWidget):
         track = track_path_for(self._workspace.cache_dir, media, settings)
         self.worker.request_preview(media, self.scrub.value(), track, settings.target_vector)
 
-    def _on_preview(self, media: Path, frame: int, rgb, landmarks) -> None:
+    def _on_preview(self, media: Path, frame: int, rgb, landmarks, everyone) -> None:
         if self._media_matches(media) and frame == self.scrub.value():
-            self._preview = (frame, rgb, landmarks)
+            self._preview = (frame, rgb, landmarks, everyone)
             self._show_preview()
 
     def _show_preview(self) -> None:
@@ -715,10 +812,17 @@ class BeautifyPage(QWidget):
             return
         from ks_studio.ui.beautify.preview_render import preview_pair
 
-        _, rgb, landmarks = self._preview
+        frame, rgb, landmarks, everyone = self._preview
         settings, points = self._settings(), self.landmarks_check.isChecked()
         box = (self.preview_label.width(), self.preview_label.height())
-        self._preview_token = self.renderer.request(lambda: preview_pair(rgb, landmarks, settings, box, points))
+        hide = []
+        if settings.blur_others:  # 보정본과 같은 판단 (한 장이라 앞뒤 프레임 잇기만 없다)
+            from ks_studio.core.face_blur import blur_plan, landmark_boxes
+            from ks_studio.services.beautify import keep_faces
+
+            protected = landmark_boxes(np.array([landmarks]), frame) if landmarks is not None else {}
+            hide = blur_plan(everyone, keep_faces(settings), protected, hold=0).get(frame, [])
+        self._preview_token = self.renderer.request(lambda: preview_pair(rgb, landmarks, settings, box, points, hide))
         self.status.setText("이 장면에는 보정할 사람이 없습니다 (그대로 둡니다)" if landmarks is None else "")
 
     # ── 보정본 만들기 ────────────────────────────────────────────
@@ -806,7 +910,7 @@ class BeautifyPage(QWidget):
     def _update_controls(self) -> None:
         ready = self.worker is not None and self._source is not None and bool(self._samples)
         rendering = self.worker is not None and self.worker.busy_with is not None
-        for widget in (*self.sliders.values(), self.shadow_color, self.fill_combo, self.resample_button, self.approve_button,
+        for widget in (*self.sliders.values(), self.shadow_color, self.lip_color, self.fill_combo, self.blur_check, self.blur_style, self.resample_button, self.approve_button,
                        self.preset_combo, self.preset_save):
             widget.setEnabled(ready)
         self.preset_delete.setEnabled(ready and self._preset_name() is not None)

@@ -18,7 +18,6 @@ from ks_studio.core.subtitles import CaptionStyle, Subtitles
 from ks_studio.services.yuv import from_planes, planes
 
 MAX_WIDTH = 0.9  # 자막 한 줄 최대 폭 = 영상 폭 × 0.9 (넘으면 줄바꿈)
-OUTLINE = 0.16  # 테두리 두께 = 글자 크기 × 0.16
 LINE_GAP = 1.15
 
 
@@ -37,34 +36,61 @@ def _wrap(text: str, metrics: QFontMetricsF, width: float) -> list[str]:
     return [line for line in lines if line.strip()]
 
 
-@lru_cache(maxsize=64)
-def caption_image(text: str, style: CaptionStyle, frame_w: int, frame_h: int) -> tuple[np.ndarray, int, int] | None:
-    """(RGBA 그림, 왼쪽 x, 위 y) — 영상 아래 가운데. 글이 없으면 None. 같은 자막은 다시 그리지 않는다."""
-    if not text.strip():
-        return None
-    px = max(8.0, min(frame_w, frame_h) * style.size)
-    font = QFont(family())  # 화면과 같은 Pretendard (자막으로 구워도 되는 무료 글꼴)
-    font.setPixelSize(round(px))
+def _font(px: float, name: str = "") -> QFont:
+    font = QFont(name or family())  # 기본은 화면과 같은 Pretendard (자막으로 구워도 되는 무료 글꼴)
+    font.setPixelSize(max(1, round(px)))
     font.setBold(True)
-    metrics = QFontMetricsF(font)
-    lines = _wrap(text.strip(), metrics, frame_w * MAX_WIDTH)
-    if not lines:
+    return font
+
+
+BOX_PAD = 0.3  # 배경 상자 안쪽 여백 = 글자 크기 × 0.3
+
+
+@lru_cache(maxsize=64)
+def caption_image(text: str, style: CaptionStyle, frame_w: int, frame_h: int, second: str = "") -> tuple[np.ndarray, int, int] | None:
+    """(RGBA 그림, 왼쪽 x, 위 y) — 영상 아래 가운데. 글이 없으면 None. 같은 자막은 다시 그리지 않는다.
+
+    second = 둘째 줄 (두 줄 자막의 영어 번역): 첫째 줄 아래에 작게, 다른 색으로.
+    style.box면 글 뒤에 반투명 상자 (밝은 화면에서도 읽히게).
+    """
+    px = max(8.0, min(frame_w, frame_h) * style.size)
+    pad = px * BOX_PAD if style.box else 0.0
+    blocks = []  # (글꼴, 줄들, 색)
+    for words, size, color in ((text, px, style.color), (second, px * style.second_size, style.second_color)):
+        if words.strip():
+            font = _font(size, style.font)
+            lines = _wrap(words.strip(), QFontMetricsF(font), frame_w * MAX_WIDTH - 2 * pad)
+            if lines:
+                blocks.append((font, lines, color))
+    if not blocks:
         return None
-    stroke = px * OUTLINE
-    line_h = metrics.height() * LINE_GAP
-    width = max(metrics.horizontalAdvance(line) for line in lines) + 2 * stroke + 4
-    height = line_h * len(lines) + 2 * stroke
+    stroke = px * max(0.0, style.outline_width)
+    edge = stroke + pad  # 그림 가장자리에서 글까지
+    width = max(QFontMetricsF(font).horizontalAdvance(line) for font, lines, _ in blocks for line in lines) + 2 * edge + 4
+    height = sum(QFontMetricsF(font).height() * LINE_GAP * len(lines) for font, lines, _ in blocks) + 2 * edge
     w, h = int(width) + 2, int(height) + 2
     image = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
-    path = QPainterPath()
-    for i, line in enumerate(lines):
-        x = (w - metrics.horizontalAdvance(line)) / 2
-        path.addText(QPointF(x, stroke + metrics.ascent() + i * line_h), font, line)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.strokePath(path, QPen(QColor(style.outline), stroke * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    painter.fillPath(path, QColor(style.color))
+    if style.box:
+        box = QColor(style.box_color)
+        box.setAlphaF(max(0.0, min(1.0, style.box_opacity)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(box)
+        painter.drawRoundedRect(QRectF(0, 0, w, h), px * 0.25, px * 0.25)
+    pen = QPen(QColor(style.outline), stroke * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    top = edge
+    for font, lines, color in blocks:
+        metrics = QFontMetricsF(font)
+        line_h = metrics.height() * LINE_GAP
+        path = QPainterPath()
+        for i, line in enumerate(lines):
+            path.addText(QPointF((w - metrics.horizontalAdvance(line)) / 2, top + metrics.ascent() + i * line_h), font, line)
+        if stroke > 0:
+            painter.strokePath(path, pen)
+        painter.fillPath(path, QColor(color))
+        top += line_h * len(lines)
     painter.end()
     rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
     array = np.frombuffer(rgba.constBits(), np.uint8).reshape(h, rgba.bytesPerLine())[:, : w * 4].reshape(h, w, 4).copy()
@@ -73,15 +99,18 @@ def caption_image(text: str, style: CaptionStyle, frame_w: int, frame_h: int) ->
     return array, x, max(0, y)
 
 
-def paint_caption(painter: QPainter, target: QRectF, text: str, style: CaptionStyle, frame_w: int, frame_h: int) -> None:
-    """화면용: 영상(frame_w×frame_h)이 target 칸에 그려졌을 때 그 위에 자막을 같은 비율로."""
-    drawn = caption_image(text, style, frame_w, frame_h)
+def paint_caption(painter: QPainter, target: QRectF, text: str, style: CaptionStyle, frame_w: int, frame_h: int,
+                  second: str = "") -> QRectF | None:
+    """화면용: 영상(frame_w×frame_h)이 target 칸에 그려졌을 때 그 위에 자막을 같은 비율로. 그린 자리(화면 좌표)를 돌려준다."""
+    drawn = caption_image(text, style, frame_w, frame_h, second)
     if drawn is None:
-        return
+        return None
     array, x, y = drawn
     scale = target.width() / frame_w
     image = QImage(array.data, array.shape[1], array.shape[0], array.shape[1] * 4, QImage.Format.Format_RGBA8888)
-    painter.drawImage(QRectF(target.x() + x * scale, target.y() + y * scale, array.shape[1] * scale, array.shape[0] * scale), image)
+    rect = QRectF(target.x() + x * scale, target.y() + y * scale, array.shape[1] * scale, array.shape[0] * scale)
+    painter.drawImage(rect, image)
+    return rect
 
 
 def burn(frame: av.VideoFrame, overlay: tuple[np.ndarray, int, int]) -> av.VideoFrame:
@@ -127,5 +156,6 @@ class CaptionBurner:
         index = self._subs.at(frame.pts / self._fps)
         if index is None:
             return frame
-        overlay = caption_image(self._subs.cues[index].text, self._subs.style, *self._size)
+        cue = self._subs.cues[index]
+        overlay = caption_image(cue.text, self._subs.style, *self._size, cue.translation)
         return burn(frame, overlay) if overlay is not None else frame

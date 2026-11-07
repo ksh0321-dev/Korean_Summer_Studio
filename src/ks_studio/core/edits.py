@@ -6,7 +6,7 @@
 from collections.abc import Callable
 from dataclasses import replace
 
-from ks_studio.core.subtitles import MIN_CUE, Cue, Subtitles
+from ks_studio.core.subtitles import Subtitles, map_times
 from ks_studio.core.project import MAIN_TRACK, MIN_VIDEO_TRACKS, Clip, Placed, Placement, Project, new_id
 
 
@@ -85,12 +85,8 @@ def _cut_cues(project: Project, start: int, end: int) -> Subtitles:
     def move(t: float) -> float:
         return t if t < lo else (lo if t < hi else t - length)
 
-    cues = []
-    for cue in project.subtitles.cues:
-        new_start, new_end = move(cue.start), move(cue.end)
-        if new_end - new_start >= MIN_CUE:
-            cues.append(Cue(round(new_start, 3), round(new_end, 3), cue.text))
-    return replace(project.subtitles, cues=tuple(cues))
+    moved = (map_times(cue, move) for cue in project.subtitles.cues)
+    return replace(project.subtitles, cues=tuple(cue for cue in moved if cue is not None))
 
 
 def delete_ranges(project: Project, ranges: list[tuple[int, int]]) -> Project:
@@ -311,7 +307,7 @@ def _follow_cues(before: Project, after: Project, old_main, new_main, old_ids: s
         anchor = next((p for p in old_main if p.start <= frame < p.end), None)
         if anchor is None:  # V1 끝 뒤
             shift = (after.main_duration - before.main_duration) / after.fps
-            cues.append(Cue(round(cue.start + shift, 3), round(cue.end + shift, 3), cue.text))
+            cues.append(map_times(cue, lambda t, shift=shift: t + shift))
             continue
         seconds = before.source_time(anchor.clip, frame - anchor.start)
         target = _main_showing(new_main, anchor.clip, seconds, old_ids)
@@ -319,8 +315,8 @@ def _follow_cues(before: Project, after: Project, old_main, new_main, old_ids: s
             continue
         local = max(0, round((seconds - target.clip.in_frame / target.clip.fps) * after.fps))
         start = (target.start + local) / after.fps
-        cues.append(Cue(round(start, 3), round(start + cue.end - cue.start, 3), cue.text))
-    return replace(after.subtitles, cues=tuple(sorted(cues, key=lambda c: (c.start, c.end))))
+        cues.append(map_times(cue, lambda t, shift=start - cue.start: t + shift))
+    return replace(after.subtitles, cues=tuple(sorted((c for c in cues if c is not None), key=lambda c: (c.start, c.end))))
 
 
 def set_subtitles(project: Project, subtitles: Subtitles) -> Project:

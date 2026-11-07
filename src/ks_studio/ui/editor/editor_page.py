@@ -139,6 +139,7 @@ class EditorPage(QWidget):
 
         self.bin = MediaBin(sources)
         self.view = VideoView(mirrored=False)  # 편집 화면은 결과물 그대로 보여준다
+        self.view.set_caption_draggable(True)  # 미리보기에서 자막을 위아래로 끌어 자리를 바꾼다
         self.player = Player(sources, self)
         self.inspector = Inspector()
         self.timeline = TimelineWidget(sources)
@@ -231,6 +232,8 @@ class EditorPage(QWidget):
         self.captions.seek_requested.connect(lambda seconds: self.player.seek(round(seconds * self.project.fps)))
         self.captions.generate_requested.connect(self._generate_captions)
         self.captions.srt_requested.connect(self._save_srt)
+        self.captions.safe_zone_toggled.connect(self.view.set_safe_zone)
+        self.view.caption_moved.connect(self._on_caption_moved)
         self.timeline.caption_clicked.connect(self._on_caption_clicked)
         self._speech = None  # 음성 인식 (처음 쓸 때 연다)
         self.right_tabs = QTabWidget()
@@ -243,9 +246,12 @@ class EditorPage(QWidget):
         """도구모음 버튼과 단축키를 함께 만드는 동작. 페이지에 붙여 두므로 버튼이 없어도 단축키가 동작한다.
 
         단축키는 ⚙ 설정의 '단축키' 탭에서 바꾼다 — 이름(버튼 글자에서 기호를 뺀 것)으로 저장한다.
+        버튼 글자가 기호뿐이면('－' '＋') 설명을 이름으로 — 예전엔 둘 다 빈 이름이 되어 '확대'가 '축소'를 덮어썼다.
         """
         action = QAction(text, self)
-        name = shortcut_name(text)
+        name = shortcut_name(text) or shortcut_name(tip)
+        if not name or name in self._shortcuts:
+            raise ValueError(f"단축키 이름이 비었거나 겹친다: {text!r} → {name!r}")
         self._shortcuts[name] = (action, tuple(keys), tip)
         self._set_keys(name, list(keys))
         action.setCheckable(checkable)
@@ -821,7 +827,7 @@ class EditorPage(QWidget):
             return False
         if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             target = self._screen_target()
-            if target is not None:
+            if target is not None and not self.view.caption_hit(event.position()):  # 자막 위면 자막 끌기 (VideoView가 한다)
                 self.player.pause()
                 clip = target.clip
                 self._view_drag = {"id": clip.id, "start": event.position(), "pos": (clip.pos_x, clip.pos_y), "draft": None}
@@ -854,10 +860,15 @@ class EditorPage(QWidget):
         """미리보기에 그 시각의 자막 (내보낼 때 굽는 것과 같은 모양) · '자막' 탭에서 그 줄을 칠한다."""
         subs, seconds = self.project.subtitles, frame / self.project.fps
         index = subs.at(seconds)
-        self.view.set_caption(subs.cues[index].text if index is not None else "", subs.style)
+        cue = subs.cues[index] if index is not None else None
+        self.view.set_caption(cue.text if cue else "", subs.style, cue.translation if cue else "")
         self.captions.set_time(seconds)
 
     # ── 자막 ────────────────────────────────────────────────────
+
+    def _on_caption_moved(self, bottom: float) -> None:
+        subs = self.project.subtitles
+        self._apply(set_subtitles(self.project, replace(subs, style=replace(subs.style, bottom=bottom))))
 
     def _on_caption_clicked(self, index: int) -> None:
         self.right_tabs.setCurrentWidget(self.captions)
@@ -886,7 +897,11 @@ class EditorPage(QWidget):
         renderer = TimelineRenderer(project, workspace, self._sources, (64, 36), "rgb24")
         self._caption_task = task
         self.captions.show_progress("타임라인 소리 모으는 중…", 0.0)
-        self._speech.request(CAPTION_KEY, task, audio_fn=renderer.audio_track)
+        subs = project.subtitles
+        from ks_studio.core.glossary import load_glossary
+
+        self._speech.request(CAPTION_KEY, task, audio_fn=renderer.audio_track, layout=(subs.line_chars, subs.max_lines),
+                             terms=load_glossary(self.captions.glossary_path))  # 용어집: 받아쓰기·번역 힌트
 
     def _on_captions_made(self, _key, cues: list) -> None:
         subs = replace(self.project.subtitles, cues=tuple(cues), task=self._caption_task)

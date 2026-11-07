@@ -36,3 +36,36 @@ def cluster(embeddings: list[np.ndarray], threshold: float = SAME_PERSON) -> lis
             centers.append(embedding.astype(np.float64))
         labels.append(label)
     return labels
+
+
+# ── 등록한 사람 (앱 전체 공통, user/people.json) ──────────────────────
+# 주인공 말고도 얼굴을 흐리지 않을 사람 (가족·출연자 등). 영상마다 고르지 않아도 알아본다.
+
+
+def load_registry(path) -> list[tuple[str, np.ndarray]]:
+    """[(이름, 인식값)]. 파일이 없거나 깨졌으면 빈 목록."""
+    import json
+
+    try:
+        items = json.loads(path.read_text(encoding="utf-8")).get("people", [])
+    except (OSError, ValueError):
+        return []
+    found = []
+    for item in items:
+        vector = np.array(item.get("embedding", []), np.float32)
+        if isinstance(item, dict) and str(item.get("name", "")).strip() and vector.shape == (512,):
+            found.append((str(item["name"]).strip(), vector))
+    return found
+
+
+def save_registry(path, people: list[tuple[str, np.ndarray]]) -> None:
+    from ks_studio.core.jsonio import write_json_atomic
+
+    data = [{"name": name, "embedding": [round(float(x), 5) for x in vector]} for name, vector in people]
+    write_json_atomic(path, {"version": 1, "people": data})
+
+
+def registered_name(registry: list[tuple[str, np.ndarray]], embedding: np.ndarray) -> str | None:
+    """이 얼굴이 등록한 사람이면 그 이름."""
+    index = match([vector for _, vector in registry], embedding)
+    return registry[index][0] if index is not None else None

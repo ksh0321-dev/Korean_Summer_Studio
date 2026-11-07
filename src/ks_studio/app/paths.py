@@ -16,6 +16,9 @@ USER_DIR = APP_DIR / "user"
 SETTINGS_PATH = USER_DIR / "settings.json"
 DEFAULT_WORKSPACE = USER_DIR / "workspace"  # 프로젝트를 고르지 않았을 때의 기본 프로젝트
 PRESETS_DIR = USER_DIR / "presets"  # AI 보정 프리셋 (프리셋마다 .json 하나)
+CAPTION_STYLES_DIR = USER_DIR / "caption_styles"  # 자막 모양 프리셋 (프리셋마다 .json 하나)
+GLOSSARY_PATH = USER_DIR / "glossary.json"  # 자막 용어집 (앱 전체 공통)
+PEOPLE_PATH = USER_DIR / "people.json"  # 등록한 사람 (얼굴을 흐리지 않을 사람, 앱 전체 공통)
 MODELS_DIR = APP_DIR / "models"  # AI 얼굴·음성 인식 모델
 
 

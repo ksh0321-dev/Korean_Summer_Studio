@@ -70,14 +70,29 @@ EYESHADOW_COLORS = {  # 칸 값 → (이름, RGB)
     "pink": ("핑크", (220, 130, 150)),
     "coral": ("코랄", (235, 125, 95)),
     "peach": ("피치", (240, 170, 130)),
+    "gold": ("골드", (205, 165, 95)),
+    "burgundy": ("버건디", (140, 60, 70)),
+    "purple": ("퍼플", (150, 105, 175)),
+    "smoky": ("스모키", (105, 95, 95)),
 }
+LIP_COLORS = {  # 칸 값 → (이름, RGB)
+    "rose": ("로즈", (196, 64, 92)),
+    "coral": ("코랄", (232, 106, 90)),
+    "red": ("레드", (190, 30, 45)),
+    "pink": ("핑크", (232, 112, 152)),
+    "nude": ("누드", (198, 128, 112)),
+    "plum": ("플럼", (138, 50, 80)),
+    "orange": ("오렌지", (236, 112, 52)),
+    "mlbb": ("MLBB", (176, 92, 92)),
+}
+LIP_GLOSS_SHEEN = (0.55, 0.42, 0.30)  # 광택 하이라이트 타원: 아랫입술에서 안쪽 쪽으로 0.55 · 반지름 가로(입 폭 대비) 0.42 · 세로(아랫입술 두께 대비) 0.30
 EFFECTS = (  # BeautySettings의 효과 세기 칸 (chin만 -1~1, 나머지 0~1)
     "smooth", "blemish", "brighten", "dark_circle",
     "slim", "cheekbone", "chin", "eyes", "nose_slim", "nose_length", "smile", "face_small",
-    "blush", "contour", "eyeshadow", "lip", "teeth", "eye_clear",
+    "blush", "contour", "eyeshadow", "lip", "lip_gloss", "teeth", "eye_clear",
     "waist", "shoulders", "legs",
 )
-PRESET_FIELDS = (*EFFECTS, "eyeshadow_color")  # 프리셋에 담는 칸 (효과 세기 + 색)
+PRESET_FIELDS = (*EFFECTS, "eyeshadow_color", "lip_color")  # 프리셋에 담는 칸 (효과 세기 + 색)
 
 
 @dataclass(frozen=True)
@@ -99,6 +114,8 @@ class BeautySettings:
     eyeshadow: float = 0.0  # 아이섀도
     eyeshadow_color: str = "brown"  # EYESHADOW_COLORS의 키
     lip: float = 0.0  # 립 컬러
+    lip_color: str = "rose"  # LIP_COLORS의 키
+    lip_gloss: float = 0.0  # 립 광택 (촉촉하게 반짝이는 입술)
     teeth: float = 0.0  # 치아 미백
     eye_clear: float = 0.0  # 눈 또렷하게
     waist: float = 0.0  # 허리 잘록 (몸매 — 몸의 점·사람 분리 모델)
@@ -107,10 +124,23 @@ class BeautySettings:
     fill: str = "migan"  # 몸매·얼굴 작게로 드러난 배경 메꾸기: telea(빠르게) · migan · lama (services.inpaint.FILLS)
     approved: bool = False  # 샘플 컷을 보고 OK했는지 — 그 뒤에야 미리보기와 보정본 만들기를 한다
     target: tuple[float, ...] | None = None  # 보정할 사람의 얼굴 인식값 (없으면 가장 큰 얼굴)
+    blur_others: bool = False  # 주인공·흐리지 않을 사람 말고 다른 얼굴은 모두 흐리게 (지나가는 사람 보호)
+    blur_style: str = "mosaic"  # core.face_blur.BLUR_STYLES의 키
+    keep: tuple[tuple[float, ...], ...] = ()  # 이 영상에서 흐리지 않을 사람들의 인식값 (등록한 사람은 앱 전체에서 따로)
 
     @property
     def is_identity(self) -> bool:
+        """보정 효과가 하나도 없다 (얼굴 흐리기는 따로 — needs_render)."""
         return all(getattr(self, name) == 0 for name in EFFECTS)
+
+    @property
+    def needs_render(self) -> bool:
+        """보정본을 만들 일이 있다: 효과가 있거나 다른 얼굴을 흐린다."""
+        return not self.is_identity or self.blur_others
+
+    @property
+    def keep_vectors(self) -> list[np.ndarray]:
+        return [np.array(k, np.float32) for k in self.keep]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -124,6 +154,7 @@ class BeautySettings:
         values = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         if values.get("target") is not None:
             values["target"] = tuple(values["target"])
+        values["keep"] = tuple(tuple(float(x) for x in k) for k in values.get("keep", ()) if len(k) == 512)
         return cls(**values)
 
 
@@ -337,6 +368,21 @@ def brow_polygons(lm: np.ndarray) -> list[np.ndarray]:
 def lip_polygons(lm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """(입술 바깥, 입 안쪽). 입술 = 바깥 - 안쪽, 치아는 안쪽에서만 찾는다."""
     return lm[list(LIPS_OUTER)], lm[list(LIPS_INNER)]
+
+
+def gloss_ellipse(lm: np.ndarray) -> Ellipse:
+    """립 광택 하이라이트 자리: 아랫입술 가운데, 입 안쪽 쪽으로 치우친 납작한 타원 (빛이 닿아 반짝이는 곳)."""
+    outer, inner = lip_polygons(lm)
+    corner_l, corner_r = lm[MOUTH_CORNERS[0]], lm[MOUTH_CORNERS[1]]
+    mid_x = (corner_l[0] + corner_r[0]) / 2
+    bottom = outer[np.argmax(outer[:, 1])]  # 아랫입술 바깥 끝
+    inner_bottom = inner[np.argmin(np.abs(inner[:, 0] - mid_x) + 1e6 * (inner[:, 1] < (corner_l[1] + corner_r[1]) / 2))]
+    toward, rx_share, ry_share = LIP_GLOSS_SHEEN
+    center = bottom + (inner_bottom - bottom) * toward
+    width = float(np.linalg.norm(corner_r - corner_l))
+    thickness = max(1.0, float(np.linalg.norm(bottom - inner_bottom)))
+    angle = math.atan2(corner_r[1] - corner_l[1], corner_r[0] - corner_l[0])
+    return Ellipse(float(center[0]), float(center[1]), width * rx_share / 2, thickness * ry_share, angle)
 
 
 def nostril_polygon(lm: np.ndarray) -> np.ndarray:

@@ -24,6 +24,7 @@ MODEL_PACK = "buffalo_l"
 DETECT_SIZE = (640, 640)
 SAMPLE_PROBES = 24  # 샘플 컷 후보로 훑어볼 장면 수
 MIN_DETECTION_SCORE = 0.6  # 실측: 뒤통수를 얼굴로 착각한 것 0.53, 진짜 얼굴 0.66~0.86
+BLUR_MIN_SCORE = 0.5  # 얼굴 흐리기는 더 넉넉히 (뒤통수를 흐려도 탈이 없지만, 흐린 얼굴을 놓치면 드러난다)
 PERSON_FRONTAL = 0.5  # '보정할 사람' 목록은 이만큼 정면인 얼굴로만 만든다 (귀·옆머리만 보이는 장면이 따로 묶이지 않게)
 LANDMARKS = 106
 
@@ -96,6 +97,8 @@ def ai_unavailable_reason() -> str | None:
 class FoundFace:
     landmarks: np.ndarray  # (106, 2)
     embedding: np.ndarray  # (512,) 길이 1
+    box: tuple[float, float, float, float] | None = None  # 얼굴 찾기 상자 (x0, y0, x1, y1)
+    score: float = 1.0  # 얼굴 찾기 점수
 
     @property
     def area(self) -> float:
@@ -158,12 +161,13 @@ class FaceDetector:
             self._app = app
         return self._app
 
-    def faces(self, rgb: np.ndarray) -> list[FoundFace]:
+    def faces(self, rgb: np.ndarray, min_score: float = MIN_DETECTION_SCORE) -> list[FoundFace]:
         found = self._load().get(np.ascontiguousarray(rgb[:, :, ::-1]))  # InsightFace는 BGR
         return [
-            FoundFace(f.landmark_2d_106.astype(np.float64), f.normed_embedding.astype(np.float32))
+            FoundFace(f.landmark_2d_106.astype(np.float64), f.normed_embedding.astype(np.float32),
+                      tuple(float(v) for v in f.bbox[:4]), float(f.det_score))
             for f in found
-            if f.det_score >= MIN_DETECTION_SCORE
+            if f.det_score >= min_score
         ]
 
 
@@ -356,9 +360,15 @@ def frames_from(path: Path, start: int = 0):
 
 
 def analyze_video(
-    detector: FaceDetector, path: Path, target: np.ndarray | None, on_progress=None, start: int = 0, count: int | None = None
+    detector: FaceDetector, path: Path, target: np.ndarray | None, on_progress=None, start: int = 0, count: int | None = None,
+    everyone: list | None = None,
 ) -> np.ndarray:
-    """start번째부터 count장(None = 끝까지) 프레임에서 보정할 얼굴의 랜드마크 (장 수, 106, 2). 그 사람이 없는 프레임은 NaN."""
+    """start번째부터 count장(None = 끝까지) 프레임에서 보정할 얼굴의 랜드마크 (장 수, 106, 2). 그 사람이 없는 프레임은 NaN.
+
+    everyone(목록)을 주면 프레임마다 찾은 모든 얼굴을 SeenFace로 담는다 (다른 사람 얼굴 흐리기 — 어차피 다 찾고 있다).
+    """
+    from ks_studio.core.face_blur import SeenFace
+
     rows = []
     with av.open(str(path)) as container:
         total = count or container.streams.video[0].frames or 0
@@ -366,11 +376,41 @@ def analyze_video(
         if count is not None and i >= count:
             break
         yield_to_playback()  # 재생 중이면 잠깐 멈춘다
-        face = choose(detector.faces(decoded.to_ndarray(format="rgb24")), target)
+        found = detector.faces(decoded.to_ndarray(format="rgb24"), BLUR_MIN_SCORE if everyone is not None else MIN_DETECTION_SCORE)
+        face = choose([f for f in found if f.score >= MIN_DETECTION_SCORE], target)
         rows.append(face.landmarks if face is not None else np.full((LANDMARKS, 2), np.nan))
+        if everyone is not None:
+            everyone += [SeenFace(start + i, f.box, f.embedding) for f in found]
         if on_progress and total and i % 15 == 0:
             on_progress(min(1.0, i / total))
     return np.stack(rows) if rows else np.zeros((0, LANDMARKS, 2))
+
+
+def everyone_file(cache_dir: Path, media_name: str) -> Path:
+    """영상 전체의 모든 얼굴 (상자·인식값) — 보정할 사람과 상관없이 하나."""
+    return cache_dir / f"{media_name}.faces_all.npz"
+
+
+def save_everyone(path: Path, faces: list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.stem + ".part.npz")
+    np.savez_compressed(
+        tmp,
+        frames=np.array([f.frame for f in faces], np.int32),
+        boxes=np.array([f.box for f in faces], np.float32).reshape(-1, 4),
+        embeddings=np.array([f.embedding for f in faces], np.float16).reshape(-1, 512),  # 반 정밀도로 충분 (닮음 비교만)
+    )
+    import os
+
+    os.replace(tmp, path)
+
+
+def load_everyone(path: Path) -> list:
+    from ks_studio.core.face_blur import SeenFace
+
+    with np.load(path) as data:
+        return [SeenFace(int(f), tuple(float(v) for v in b), e.astype(np.float32))
+                for f, b, e in zip(data["frames"], data["boxes"], data["embeddings"])]
 
 
 def track_file(cache_dir: Path, media_name: str, target: np.ndarray | None) -> Path:

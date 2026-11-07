@@ -22,6 +22,7 @@ from ks_studio.core.beauty import (
     BLUSH_COLOR,
     EFFECTS,
     EYESHADOW_COLORS,
+    LIP_COLORS,
     SLIM_RADIUS,
     BeautySettings,
     Ellipse,
@@ -44,18 +45,25 @@ from ks_studio.core.beauty import (
     size_weight,
     skin_polygon,
     face_outline,
+    gloss_ellipse,
     slim_pulls,
     smile_pulls,
     smooth_track,
     under_eye_ellipses,
 )
+from ks_studio.services.blur import blur_frame
 from ks_studio.services.face import (
+    BLUR_MIN_SCORE,
+    MIN_DETECTION_SCORE,
     FaceDetector,
     analyze_video,
     choose,
+    everyone_file,
     frame_at,
     frames_from,
+    load_everyone,
     load_probes,
+    save_everyone,
     save_probes,
     scan,
     track_file,
@@ -75,8 +83,10 @@ SMOOTH_MAX = 0.85  # 매끈하게 100%: 흐린 피부를 85% 섞는다 (결이 �
 SMOOTH_EYES_PX = 120  # 피부 흐리기는 눈 사이 거리가 이 정도가 되게 줄여서 한다 (4K 얼굴도 같은 모습·빠르게)
 BRIGHTEN_MAX = 0.12  # 톤 밝게 100%: 남은 밝기 여유의 12%만큼
 DARK_CIRCLE_MAX = 0.22
-LIP_COLOR = (196, 64, 92)  # RGB, 로즈
-LIP_MAX = 0.6  # 립 컬러 100%: 입술 색(밝기 제외)을 60%만큼 바꾼다
+LIP_MAX = 0.6  # 립 컬러 100%: 입술 색(a·b)을 60%만큼, 밝기는 그 1/4만큼 바꾼다 (레드·플럼은 조금 짙게, 누드는 조금 밝게)
+GLOSS_BOOST = 1.4  # 립 광택 100%: 입술에 원래 있던 반짝임(주변보다 밝은 곳)을 1.4배 더 밝게
+GLOSS_SHEEN = 0.45  # 립 광택 100%: 아랫입술 하이라이트에서 남은 밝기 여유의 45%만큼
+GLOSS_CHROMA = 0.12  # 립 광택 100%: 입술 색을 12% 더 진하게 (젖은 입술은 색이 깊어 보인다)
 TEETH_WHITEN, TEETH_BRIGHT = 0.8, 0.15  # 치아 노란기를 80% 빼고, 밝기 여유의 15%만큼 밝게
 EYE_SHARPEN = 1.5
 BLEMISH_DEPTH = 8  # 주변(가운데값)보다 G 채널이 이만큼 넘게 어두우면 잡티로 보기 시작, 2배면 완전히
@@ -137,7 +147,9 @@ def _apply_face(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautyS
     if k["eyeshadow"] > 0:
         _eyeshadow(face, lm, k["eyeshadow"], settings.eyeshadow_color)
     if k["lip"] > 0:
-        _lips(face, lm, k["lip"])
+        _lips(face, lm, k["lip"], settings.lip_color)
+    if k["lip_gloss"] > 0:  # 색 다음에: 칠한 색 위에 반짝임
+        _gloss(face, lm, k["lip_gloss"])
     if k["teeth"] > 0:
         _teeth(face, lm, k["teeth"])
     if k["eye_clear"] > 0:
@@ -221,6 +233,7 @@ REGION_COLORS = {  # RGB
     "nose_length": (40, 230, 220),
     "blush": (255, 105, 150),
     "lip": (255, 60, 90),
+    "lip_gloss": (255, 255, 255),
     "teeth": (255, 255, 255),
     "eye_clear": (255, 255, 120),
 }
@@ -293,6 +306,8 @@ def _areas(image: np.ndarray, lm: np.ndarray, settings: BeautySettings) -> list[
         areas.append(("eyeshadow", np.minimum(1.0, 1.5 * _eyelid_mask(shape, lm)), []))
     if settings.lip:
         areas.append(("lip", _lip_mask(shape, lm), []))
+    if settings.lip_gloss:
+        areas.append(("lip_gloss", np.minimum(1.0, 2 * _ellipses_mask(shape, [gloss_ellipse(lm)])), []))
     if settings.teeth:
         areas.append(("teeth", _fill(shape, [lip_polygons(lm)[1]]), []))
     if settings.eye_clear:
@@ -474,14 +489,43 @@ def _in_lab(face: np.ndarray, alpha: np.ndarray, change) -> None:
     crop[:] = np.where((a > 1e-3)[..., None], back, crop)
 
 
-def _lips(face: np.ndarray, lm: np.ndarray, strength: float) -> None:
-    """입술 색(a·b)만 립 컬러 쪽으로 — 밝기(L)는 그대로 둬서 입술 결·윤기가 남는다."""
-    target = cv2.cvtColor(np.array([[LIP_COLOR]], np.float32) / 255, cv2.COLOR_RGB2LAB)[0, 0]
+def _lips(face: np.ndarray, lm: np.ndarray, strength: float, color: str = "rose") -> None:
+    """입술 색(a·b)을 립 컬러 쪽으로, 밝기(L)는 조금만 — 입술 결·윤기가 남는다."""
+    rgb = LIP_COLORS[color if color in LIP_COLORS else "rose"][1]
+    target = cv2.cvtColor(np.array([[rgb]], np.float32) / 255, cv2.COLOR_RGB2LAB)[0, 0]
 
     def tint(lab, a):
-        lab[..., 1:] += (target[1:] - lab[..., 1:]) * (a * LIP_MAX * min(1.0, strength))[..., None]
+        amount = (a * LIP_MAX * min(1.0, strength))[..., None]
+        lab[..., 1:] += (target[1:] - lab[..., 1:]) * amount
+        lab[..., :1] += (target[:1] - lab[..., :1]) * amount * 0.25
 
     _in_lab(face, _lip_mask(face.shape, lm), tint)
+
+
+def _gloss(face: np.ndarray, lm: np.ndarray, strength: float) -> None:
+    """립 광택: (1) 입술에 원래 있던 반짝임을 키우고 (2) 아랫입술 가운데에 촉촉한 하이라이트 (3) 색을 조금 깊게.
+
+    (1)이 입술 모양·빛 방향을 그대로 따라가서 자연스럽고, (2)는 반짝임이 거의 없는 입술(무광 립·흐린 조명)에도 윤기를 준다.
+    """
+    s = min(1.0, strength)
+    eyes = eye_distance(lm)
+    mask = _lip_mask(face.shape, lm)
+    box = _box(mask)
+    if box is None:
+        return
+    # _in_lab은 입술 상자만 잘라 넘긴다 → 하이라이트도 같은 상자로
+    sheen = cv2.GaussianBlur(_ellipses_mask(face.shape, [gloss_ellipse(lm)]), (0, 0), max(0.5, 0.02 * eyes))[box]
+
+    def shine(lab, a):
+        light = lab[..., 0]
+        local = cv2.GaussianBlur(light, (0, 0), max(1.0, 0.04 * eyes))  # 입술 주변 밝기 (그보다 밝은 곳 = 반짝임)
+        spark = np.clip(light - local, 0, None)
+        boost = a * spark * GLOSS_BOOST * s
+        sheen_a = np.minimum(a, sheen) * GLOSS_SHEEN * s
+        lab[..., 0] = np.clip(light + boost + (100 - light) * sheen_a, 0, 100)
+        lab[..., 1:] *= (1 + GLOSS_CHROMA * s * a - 0.5 * sheen_a)[..., None]  # 하이라이트 자리는 하얗게 (색을 덜)
+
+    _in_lab(face, mask, shine)
 
 
 def _teeth(face: np.ndarray, lm: np.ndarray, strength: float) -> None:
@@ -626,8 +670,12 @@ def body_frames(settings: BeautySettings) -> BodyFrames | None:
     return BodyFrames(MemoryFill(make_fill(settings.fill)))  # 영상 내내 하나: 예전에 본 배경을 기억하고 앞 프레임과 섞는다
 
 
-def render_beautified(path: Path, output: Path, track: np.ndarray, settings: BeautySettings, on_progress=None) -> None:
-    """path(고정 fps 파일)를 보정해서 output으로. track = smooth_track을 거친 프레임별 랜드마크. 소리는 그대로 복사."""
+def render_beautified(path: Path, output: Path, track: np.ndarray, settings: BeautySettings, on_progress=None,
+                      hide: dict | None = None) -> None:
+    """path(고정 fps 파일)를 보정해서 output으로. track = smooth_track을 거친 프레임별 랜드마크. 소리는 그대로 복사.
+
+    hide = 프레임 → 흐릴 얼굴 상자들 (다른 사람 얼굴 흐리기, face_blur_plan).
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(output.name + ".part")
     try:
@@ -653,6 +701,8 @@ def render_beautified(path: Path, output: Path, track: np.ndarray, settings: Bea
                     yield_to_playback()  # 재생 중이면 잠깐 멈춘다
                     landmarks = track[index] if index < total else None
                     frame = apply_frame(decoded, landmarks, settings, bodies(decoded, landmarks) if bodies else None)
+                    if hide:
+                        frame = blur_frame(frame, hide.get(index, ()), settings.blur_style)
                     # v_out.time_base는 첫 mux 때 컨테이너가 1/15360 같은 값으로 바꾼다 → 고정된 1/fps를 써야 한다
                     frame.pts, frame.time_base = index, frame_tb
                     dst.mux(v_out.encode(frame))
@@ -676,7 +726,8 @@ def _even(value: float) -> int:
 
 
 def render_side_by_side(
-    path: Path, output: Path, start: int, count: int, landmarks, settings: BeautySettings, on_progress=None
+    path: Path, output: Path, start: int, count: int, landmarks, settings: BeautySettings, on_progress=None,
+    hide: dict | None = None,
 ) -> None:
     """path(고정 fps 파일)의 start번째 프레임부터 count장을 '왼쪽 원본 | 오른쪽 보정' 한 영상으로 (소리는 그 구간).
 
@@ -706,6 +757,8 @@ def render_side_by_side(
                 yield_to_playback()
                 lm = landmarks(done)
                 after = apply_frame(frame, lm, settings, bodies(frame, lm) if bodies else None)
+                if hide:  # 프레임 번호는 영상 전체 기준
+                    after = blur_frame(after, hide.get(start + done, ()), settings.blur_style)
                 canvas[:, :half_w] = frame.reformat(half_w, half_h, format="rgb24").to_ndarray()
                 canvas[:, half_w + CLIP_GAP :] = after.reformat(half_w, half_h, format="rgb24").to_ndarray()
                 out = av.VideoFrame.from_ndarray(canvas, format="rgb24").reformat(format="yuv420p")
@@ -753,7 +806,7 @@ class AiWorker(QObject):
     """AI 작업을 스레드 하나에서 차례로. 미리보기는 '가장 최근 요청'만 처리한다 (스크럽 중 밀린 요청은 버림)."""
 
     samples_ready = Signal(Path, object)  # 원본, list[Probe] (샘플 후보 장면과 얼굴들)
-    preview_ready = Signal(Path, int, object, object)  # 원본, 프레임, 원래 RGB, 랜드마크(없으면 None)
+    preview_ready = Signal(Path, int, object, object, object)  # 원본, 프레임, 원래 RGB, 랜드마크(없으면 None), 모든 얼굴(SeenFace)
     progress = Signal(str, Path, float)  # "samples"·"analyze"·"render"·"clip", 원본, 0~1
     rendered = Signal(Path, Path)  # 원본, 보정본
     clip_ready = Signal(Path, Path)  # 원본, 원본|보정 나란히 미리보기 영상
@@ -820,21 +873,30 @@ class AiWorker(QObject):
         rgb = frame_at(path, frame)
         if rgb is None:
             return
-        landmarks = None
+        from ks_studio.core.face_blur import SeenFace
+
+        found = self._detector.faces(rgb, BLUR_MIN_SCORE)  # 다른 사람 얼굴 흐리기 미리보기에도 쓴다
+        everyone = [SeenFace(frame, f.box, f.embedding) for f in found]
         if track_path.exists():  # 분석을 해 두었으면 떨림을 줄인 값을 쓴다 (보정본과 같은 모습)
             track = smooth_track(np.load(track_path))
             landmarks = track[frame] if frame < len(track) and not np.isnan(track[frame]).any() else None
         else:
-            face = choose(self._detector.faces(rgb), target)
+            face = choose([f for f in found if f.score >= MIN_DETECTION_SCORE], target)
             landmarks = face.landmarks if face is not None else None
-        self.preview_ready.emit(path, frame, rgb, landmarks)
+        self.preview_ready.emit(path, frame, rgb, landmarks, everyone)
 
     def _do_render(self, path: Path, output: Path, track_path: Path, settings: BeautySettings, original=None) -> None:
-        if not track_path.exists():  # 처음이면 영상 전체 얼굴 분석부터 (강도를 바꿔도 다시 할 필요 없다)
-            raw = analyze_video(self._detector, path, settings.target_vector, lambda r: self.progress.emit("analyze", path, r))
+        everyone_path = everyone_file(track_path.parent, cache_name(path))
+        # 처음이면 영상 전체 얼굴 분석부터 (강도를 바꿔도 다시 할 필요 없다). 모든 얼굴도 같이 담아 둔다 (흐리기용, 추가 비용 없음)
+        if not track_path.exists() or (settings.blur_others and not everyone_path.exists()):
+            everyone: list = []
+            raw = analyze_video(self._detector, path, settings.target_vector, lambda r: self.progress.emit("analyze", path, r),
+                                everyone=everyone)
             track_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(track_path, raw.astype(np.float32))
+            save_everyone(everyone_path, everyone)
         track = smooth_track(np.load(track_path).astype(np.float64))
+        hide = face_blur_plan(settings, load_everyone(everyone_path), track) if settings.blur_others else None
 
         def on_progress(ratio: float) -> None:
             self.progress.emit("render", path, ratio)
@@ -846,11 +908,12 @@ class AiWorker(QObject):
             def beautify(frame: av.VideoFrame) -> av.VideoFrame:
                 index = frame.pts
                 landmarks = track[index] if 0 <= index < len(track) else None
-                return apply_frame(frame, landmarks, settings, bodies(frame, landmarks) if bodies else None)
+                after = apply_frame(frame, landmarks, settings, bodies(frame, landmarks) if bodies else None)
+                return blur_frame(after, hide.get(index, ()), settings.blur_style) if hide else after
 
             make_optimized(source, output, plan, on_progress, process=beautify)
         else:
-            render_beautified(path, output, track, settings, on_progress)
+            render_beautified(path, output, track, settings, on_progress, hide)
         self.busy_with = None
         self.rendered.emit(path, output)
 
@@ -859,21 +922,42 @@ class AiWorker(QObject):
         with av.open(str(path)) as container:
             stream = container.streams.video[0]
             count = min(round(CLIP_SECONDS * float(stream.average_rate)), max(1, (stream.frames or 0) - start))
-        if track_path.exists():  # 영상 전체를 분석해 두었으면 그대로 (보정본과 같은 모습)
+        everyone_path = everyone_file(track_path.parent, cache_name(path))
+        if track_path.exists() and (not settings.blur_others or everyone_path.exists()):  # 영상 전체를 분석해 두었으면 그대로
             track = smooth_track(np.load(track_path).astype(np.float64))[start : start + count]
+            everyone = load_everyone(everyone_path) if settings.blur_others else []
+            everyone = [f for f in everyone if start <= f.frame < start + count]
             share = 0.0
         else:  # 아니면 이 구간만 분석 (1분이면 영상 전체보다 훨씬 빠르다)
+            everyone = []
             raw = analyze_video(self._detector, path, settings.target_vector,
-                                lambda r: self.progress.emit("clip", path, 0.5 * r), start=start, count=count)
+                                lambda r: self.progress.emit("clip", path, 0.5 * r), start=start, count=count, everyone=everyone)
             track = smooth_track(raw)
             share = 0.5
+        hide = face_blur_plan(settings, everyone, track, start) if settings.blur_others else None
 
         def landmarks(i: int):
             return track[i] if i < len(track) and not np.isnan(track[i]).any() else None
 
         render_side_by_side(path, output, start, count, landmarks, settings,
-                            lambda r: self.progress.emit("clip", path, share + (1 - share) * r))
+                            lambda r: self.progress.emit("clip", path, share + (1 - share) * r), hide)
         self.clip_ready.emit(path, output)
+
+
+def keep_faces(settings: BeautySettings) -> list[np.ndarray]:
+    """흐리지 않을 사람들의 인식값: 주인공 + 이 영상에서 고른 사람 + 등록한 사람 (앱 전체)."""
+    from ks_studio.app.paths import PEOPLE_PATH
+    from ks_studio.core.people import load_registry
+
+    keep = [settings.target_vector] if settings.target is not None else []
+    return keep + settings.keep_vectors + [vector for _, vector in load_registry(PEOPLE_PATH)]
+
+
+def face_blur_plan(settings: BeautySettings, everyone: list, track: np.ndarray, start: int = 0) -> dict:
+    """프레임 → 흐릴 얼굴 상자들. track = 주인공 얼굴 점 (start번째 프레임부터) — 그 자리 얼굴은 흐리지 않는다."""
+    from ks_studio.core.face_blur import blur_plan, landmark_boxes
+
+    return blur_plan(everyone, keep_faces(settings), landmark_boxes(track, start))
 
 
 def track_path_for(cache_dir: Path, media: Path, settings: BeautySettings) -> Path:

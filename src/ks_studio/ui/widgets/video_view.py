@@ -1,17 +1,25 @@
 """카메라 프레임을 그리는 위젯. 미리보기는 좌우반전한다 (녹화본은 원본 유지).
 
 위에 겹쳐 그리는 것: 9:16 세로 가이드, 가운데 큰 글자(카운트다운), 왼쪽 위 배지(● REC 00:12),
-편집 화면에서 선택한 클립의 테두리(화면 비율 좌표).
+편집 화면에서 선택한 클립의 테두리(화면 비율 좌표), 자막(위아래로 끌어 자리를 바꾼다), 숏폼 안전 영역.
 """
 
+from dataclasses import replace
+
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtMultimedia import QVideoFrame, QVideoSink
 from PySide6.QtWidgets import QWidget
 
+# 세로(9:16) 숏폼에서 앱 화면(제목·버튼·설명)이 덮는 곳 — 화면 비율 (왼쪽, 위, 오른쪽, 아래). 쇼츠·릴스·틱톡을 대략 아우른다
+SAFE_MARGINS = (0.06, 0.12, 0.16, 0.22)
+CAPTION_BOTTOM_MAX = 0.85
+
 
 class VideoView(QWidget):
+    caption_moved = Signal(float)  # 자막을 끌어 놓은 자리: 아래 여백 (화면 높이 비율)
+
     def __init__(self, mirrored: bool = True, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.sink = QVideoSink(self)
@@ -23,7 +31,21 @@ class VideoView(QWidget):
         self._overlay = ""
         self._badge = ""
         self._box: QRectF | None = None  # 0~1 화면 비율 좌표
-        self._caption: tuple | None = None  # (자막 글, CaptionStyle) — 내보낼 때 굽는 것과 같은 모양으로
+        self._caption: tuple | None = None  # (자막 글, CaptionStyle, 둘째 줄) — 내보낼 때 굽는 것과 같은 모양으로
+        self._caption_rect: QRectF | None = None  # 마지막으로 그린 자막 자리 (끌기용)
+        self._caption_drag: list | None = None  # [잡은 곳에서 자막 아래끝까지, 지금 아래 여백]
+        self._caption_draggable = False
+        self._safe = False
+
+    def set_caption_draggable(self, on: bool) -> None:
+        """자막을 위아래로 끌어 자리를 바꿀 수 있게 (편집 화면)."""
+        self._caption_draggable = on
+        self.setMouseTracking(on)
+
+    def set_safe_zone(self, on: bool) -> None:
+        """세로 영상에서 숏폼 앱 화면이 덮는 곳을 어둡게 보인다 (자막·글을 그 안쪽에 두게)."""
+        self._safe = on
+        self.update()
 
     def set_message(self, text: str) -> None:
         """프레임 대신 안내 문구를 띄운다."""
@@ -72,8 +94,8 @@ class VideoView(QWidget):
         self._image = frame.toImage()
         self.update()
 
-    def set_caption(self, text: str, style) -> None:
-        caption = (text, style) if text else None
+    def set_caption(self, text: str, style, second: str = "") -> None:
+        caption = (text, style, second) if text or second else None
         if caption != self._caption:
             self._caption = caption
             self.update()
@@ -97,7 +119,14 @@ class VideoView(QWidget):
         if self._caption is not None:
             from ks_studio.services.captions import paint_caption  # 자막이 있을 때만 (녹화 화면은 필요 없다)
 
-            paint_caption(painter, QRectF(target), self._caption[0], self._caption[1], self._image.width(), self._image.height())
+            text, style, second = self._caption
+            if self._caption_drag is not None:  # 끄는 중: 놓기 전까지 화면에서만 옮겨 보인다
+                style = replace(style, bottom=self._caption_drag[1])
+            self._caption_rect = paint_caption(painter, QRectF(target), text, style, self._image.width(), self._image.height(), second)
+        else:
+            self._caption_rect = None
+        if self._safe and self._image.height() > self._image.width():
+            self._paint_safe_zone(painter, target)
 
         if self._guide:
             self._paint_guide(painter, target)
@@ -120,6 +149,64 @@ class VideoView(QWidget):
             painter.setPen(QColor("#ffffff"))
             painter.setFont(QFont(self.font().family(), max(24, target.height() // 4), QFont.Weight.Bold))
             painter.drawText(target, Qt.AlignmentFlag.AlignCenter, self._overlay)
+
+    def _paint_safe_zone(self, painter: QPainter, target: QRect) -> None:
+        left, top, right, bottom = SAFE_MARGINS
+        w, h = target.width(), target.height()
+        safe = QRectF(target.left() + w * left, target.top() + h * top, w * (1 - left - right), h * (1 - top - bottom))
+        shade = QColor(255, 80, 80, 45)
+        outer = QRectF(target)
+        painter.fillRect(QRectF(outer.left(), outer.top(), outer.width(), safe.top() - outer.top()), shade)
+        painter.fillRect(QRectF(outer.left(), safe.bottom(), outer.width(), outer.bottom() - safe.bottom()), shade)
+        painter.fillRect(QRectF(outer.left(), safe.top(), safe.left() - outer.left(), safe.height()), shade)
+        painter.fillRect(QRectF(safe.right(), safe.top(), outer.right() - safe.right(), safe.height()), shade)
+        painter.setPen(QPen(QColor(255, 120, 120, 200), 1, Qt.PenStyle.DashLine))
+        painter.drawRect(safe)
+        painter.setFont(QFont(self.font().family(), 9))
+        painter.drawText(safe.adjusted(4, 2, -4, -2), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, "숏폼 안전 영역")
+
+    # ── 자막 끌기 ────────────────────────────────────────────────
+
+    def caption_hit(self, pos) -> bool:
+        """pos(위젯 좌표)가 끌 수 있는 자막 위인가."""
+        return self._caption_draggable and self._caption_rect is not None and self._caption_rect.contains(pos)
+
+    def _target_height(self) -> float:
+        return max(1.0, float(self.image_rect().height()))
+
+    def mousePressEvent(self, event) -> None:
+        y = event.position().y()
+        if (self._caption_draggable and event.button() == Qt.MouseButton.LeftButton and self._caption_rect is not None
+                and self._caption_rect.contains(event.position())):
+            self._caption_drag = [self._caption_rect.bottom() - y, self._caption[1].bottom]
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        y = event.position().y()
+        if self._caption_drag is not None:
+            target = self.image_rect()
+            bottom_px = y + self._caption_drag[0]
+            self._caption_drag[1] = max(0.0, min(CAPTION_BOTTOM_MAX, (target.bottom() - bottom_px) / self._target_height()))
+            self.update()
+            return
+        if self._caption_draggable:
+            over = self._caption_rect is not None and self._caption_rect.contains(event.position())
+            self.setCursor(Qt.CursorShape.SizeVerCursor if over else Qt.CursorShape.ArrowCursor)
+            self.setToolTip("위아래로 끌어 자막 자리 바꾸기" if over else "")
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._caption_drag is not None:
+            bottom = round(self._caption_drag[1], 3)
+            self._caption_drag = None
+            if self._caption is not None:  # 받는 쪽이 저장할 때까지 놓은 자리에 보이게
+                text, style, second = self._caption
+                self._caption = (text, replace(style, bottom=bottom), second)
+            self.update()
+            self.caption_moved.emit(bottom)
+            return
+        super().mouseReleaseEvent(event)
 
     def _paint_guide(self, painter: QPainter, target: QRect) -> None:
         """릴스용 9:16 영역만 밝게 두고 바깥을 어둡게 + 테두리."""

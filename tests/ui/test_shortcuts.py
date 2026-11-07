@@ -23,3 +23,18 @@ def test_tab_returns_only_changed_keys():
     assert tab.overrides() == {"분할": [], "재생/정지": ["K"]} and not tab.problems()
     tab._reset()
     assert tab.overrides() == {}
+
+
+def test_editor_shortcut_names_are_unique_and_not_blank(tmp_path):
+    """컷편집 단축키 목록: 이름이 비거나 겹치면 설정 창에 빈 줄이 생기고 한쪽이 사라진다 (－·＋ 확대/축소가 그랬다)."""
+    from PySide6.QtWidgets import QApplication
+
+    from ks_studio.services.sources import SourceCache
+    from ks_studio.ui.editor.editor_page import EditorPage
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    sources = SourceCache()
+    page = EditorPage(sources)
+    names = [name for name, _tip, _keys in page.shortcut_catalog()]
+    assert all(names) and len(names) == len(set(names))
+    assert {"축소", "확대"} <= set(names)

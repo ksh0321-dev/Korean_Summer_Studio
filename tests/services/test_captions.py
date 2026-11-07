@@ -63,3 +63,24 @@ def test_burn_on_height_with_odd_half():
     rgb = out.to_ndarray(format="rgb24")
     assert rgb.shape == (1422, 800, 3) and np.abs(rgb[:600].astype(int) - 90).max() <= 2  # 위쪽은 그대로
     assert rgb[1200:1320].max() > 200  # 아래에 흰 글자
+
+
+def test_bilingual_caption_draws_smaller_second_line_in_its_color():
+    style = CaptionStyle()
+    one, _, y1 = caption_image("이쁘지?", style, 1080, 1920)
+    two, _, y2 = caption_image("이쁘지?", style, 1080, 1920, "Isn't it pretty?")
+    assert two.shape[0] > one.shape[0] and y2 < y1  # 두 줄 — 아래 여백은 그대로라 위로 자란다
+    lower = two[one.shape[0] :]
+    filled = lower[lower[..., 3] == 255][:, :3].astype(int)
+    yellowish = (filled[:, 0] > 200) & (filled[:, 1] > 180) & (filled[:, 2] < 150)
+    assert yellowish.sum() > 50  # 둘째 줄은 노란색 (style.second_color)
+    assert caption_image("", style, 1080, 1920, "Only English") is not None
+
+
+def test_box_and_outline_options():
+    plain, _, _ = caption_image("Hi", CaptionStyle(outline_width=0.0), 1080, 1920)
+    assert not ((plain[..., 3] == 255) & (plain[..., :3].max(axis=2) < 40)).any()  # 테두리 0 → 검은 화소 없음
+    boxed, _, _ = caption_image("Hi", CaptionStyle(box=True, box_color="#0000ff", box_opacity=1.0), 1080, 1920)
+    corner = boxed[boxed.shape[0] // 2, 2]
+    assert corner[3] == 255 and corner[2] > 200 and corner[0] < 40  # 글자 밖 가장자리도 파란 상자
+    assert boxed.shape[1] > plain.shape[1]  # 상자 안쪽 여백만큼 넓다

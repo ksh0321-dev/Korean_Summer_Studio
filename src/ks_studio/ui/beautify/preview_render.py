@@ -10,6 +10,7 @@ import numpy as np
 
 from ks_studio.core.beauty import BeautySettings
 from ks_studio.services.beautify import apply, regions
+from ks_studio.services.blur import blur_image
 from ks_studio.services.body import body_models_ready
 from ks_studio.services.inpaint import make_fill
 from ks_studio.services.reshape import BODY_EFFECTS, body_for_image, needs_body
@@ -87,14 +88,20 @@ def sample_strip(rgb: np.ndarray, landmarks: np.ndarray, settings: BeautySetting
 
 
 def preview_pair(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautySettings, box: tuple[int, int],
-                 show_points: bool) -> np.ndarray:
-    """장면 미리보기: 보정 전 | 보정 후를 box(가로, 세로) 안에 들어가게. 줄인 그림에 효과를 입힌다."""
+                 show_points: bool, hide=()) -> np.ndarray:
+    """장면 미리보기: 보정 전 | 보정 후를 box(가로, 세로) 안에 들어가게. 줄인 그림에 효과를 입힌다.
+
+    hide = 흐릴 얼굴 상자들 (원래 크기 좌표) — 보정 후 쪽에만.
+    """
     half_w = max(1, (box[0] - GAP) // 2)
     scale = min(half_w / rgb.shape[1], max(1, box[1]) / rgb.shape[0], 1.0)
     size = (max(2, round(rgb.shape[1] * scale)), max(2, round(rgb.shape[0] * scale)))
     small = cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
     local = None if landmarks is None else landmarks * scale
     after = apply(small, local, settings, frame_width=rgb.shape[1] * scale, body=_body(small, local, settings))
+    if hide:
+        after = after.copy() if after is small else after
+        blur_image(after, hide, settings.blur_style, scale)
     if show_points and local is not None:
         after = after.copy()
         for x, y in local.astype(int):

@@ -57,6 +57,8 @@ def analyze_body(small_rgb: np.ndarray, width: int, height: int, near=None, anal
     parts = analyzer.parts(small_rgb)
     sh, sw = small_rgb.shape[:2]
     near_small = None if near is None else (near[0] * sw / width, near[1] * sh / height)
+    if near_small is not None:
+        parts = only_person(parts, sw, sh, near_small)
     box = person_box(parts, sw, sh, near_small)
     keypoints = None
     if box is not None:
@@ -71,6 +73,30 @@ def analyze_body(small_rgb: np.ndarray, width: int, height: int, near=None, anal
             head = (analyzer.parts(small_rgb[y0:y1, x0:x1]),
                     (round(x0 * width / sw), round(y0 * height / sh), round(x1 * width / sw), round(y1 * height / sh)))
     return BodyInfo(parts, keypoints, head, fill)
+
+
+def only_person(parts: np.ndarray, width: int, height: int, near: tuple[float, float]) -> np.ndarray:
+    """보정할 사람 한 명만 남긴 부위 확률: 얼굴 자리(near)가 든 사람 덩어리 밖은 배경으로.
+
+    사람 분리는 화면의 모든 사람을 '사람'으로 본다 → 그대로 두면 다리 길게·얼굴 작게가 옆사람까지 늘리고 줄였다.
+    두 사람이 붙어 있으면 한 덩어리라 같이 바뀐다 (사람 분리로는 가를 수 없다).
+    """
+    person = (parts[..., BACKGROUND] < 0.5).astype(np.uint8)
+    count, labels = cv2.connectedComponents(person, connectivity=8)
+    if count <= 2:  # 사람이 하나뿐 (또는 없음)
+        return parts
+    nx = min(PARTS_SIZE - 1, max(0, int(near[0] / width * PARTS_SIZE)))
+    ny = min(PARTS_SIZE - 1, max(0, int(near[1] / height * PARTS_SIZE)))
+    label = labels[ny, nx]
+    if label == 0:  # 얼굴 자리가 배경으로 나왔다 — 가장 가까운 사람 덩어리
+        ys, xs = np.nonzero(labels)
+        nearest = np.argmin((xs - nx) ** 2 + (ys - ny) ** 2)
+        label = labels[ys[nearest], xs[nearest]]
+    keep = cv2.dilate((labels == label).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0  # 경계의 옅은 확률은 남긴다
+    out = parts.copy()
+    out[~keep] = 0
+    out[~keep, BACKGROUND] = 1
+    return out
 
 
 def _head_box(parts: np.ndarray, width: int, height: int, near: tuple[float, float]) -> tuple[int, int, int, int] | None:
