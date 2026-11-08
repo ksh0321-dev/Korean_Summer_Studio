@@ -109,6 +109,7 @@ class TimelineRenderer:
         self._pix_fmt = pix_fmt
         self.samples_per_frame = AUDIO_RATE // project.fps
         self._luts: dict[tuple, av.filter.Graph] = {}
+        self._cubes: dict[str, Path | None] = {}  # 원본 → 색 보정 .cube (색 보정 탭)
 
     def audio_track(self) -> np.ndarray:
         """타임라인 전체 소리 (48kHz 모노 float32, 영상은 풀지 않는다) — 자막 음성 인식용."""
@@ -256,11 +257,23 @@ class TimelineRenderer:
         for k in range(produced, last):
             yield k, filler
 
+    def _source_cube(self, source: str) -> Path | None:
+        if source not in self._cubes:
+            from ks_studio.services.grade import source_cube
+
+            self._cubes[source] = source_cube(self._workspace, source)
+        return self._cubes[source]
+
     def _prepare(self, decoded: av.VideoFrame, clip: Clip) -> av.VideoFrame:
-        """맞추기 전에: LUT → 자르기·회전·뒤집기 → 색 보정. 아무것도 안 했으면 그대로 (변환 비용 없음)."""
-        if not (clip.shaped or clip.graded):
+        """맞추기 전에: 원본 색 보정(색 보정 탭) → 클립 LUT → 자르기·회전·뒤집기 → 클립 색. 아무것도 안 했으면 그대로 (변환 비용 없음)."""
+        cube = self._source_cube(clip.source)
+        if not (clip.shaped or clip.graded or cube):
             return decoded
         rgb = decoded.to_ndarray(format="rgb24")
+        if cube is not None:
+            rgb = self._apply_lut(rgb, str(cube))
+        if not (clip.shaped or clip.graded):
+            return av.VideoFrame.from_ndarray(rgb, format="rgb24")
         if clip.lut:
             rgb = self._apply_lut(rgb, clip.lut)
         if clip.shaped:

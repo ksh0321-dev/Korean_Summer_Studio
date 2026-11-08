@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QProgressBar,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +36,11 @@ from ks_studio.ui.widgets.layout import stage_layout
 from ks_studio.ui.widgets.source_row import SourceRow, add_row, clock, facts
 
 TIMELINE = "<timeline>"  # 목록 맨 위 '컷편집 타임라인'의 자리 표시
+TIMELINE_NOTICE = (
+    "컷편집 타임라인은 여기서 바로 재생되지 않습니다.\n\n"
+    "• 편집한 모습은 [컷편집] 탭에서 확인하세요.\n"
+    "• 비율·자막·글자까지 합친 결과는 오른쪽 [저해상도 미리보기]를 누르면 여기서 재생됩니다."
+)
 from ks_studio.ui.widgets.status_bar import ERROR, INFO
 
 
@@ -82,11 +88,18 @@ class ExportPage(QWidget):
         # 가운데: 원본 / 미리보기 재생
         self.view_label = QLabel("왼쪽에서 내보낼 영상을 고르세요")
         self.player = ClipPlayer()
+        # 재생할 것이 없을 때(컷편집 타임라인을 고르고 아직 미리보기를 만들지 않았을 때) 검은 화면 대신 안내
+        self.screen_notice = QLabel("왼쪽에서 내보낼 영상을 고르세요")
+        self.screen_notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.screen_notice.setWordWrap(True)
+        self.screen = QStackedWidget()
+        self.screen.addWidget(self.screen_notice)
+        self.screen.addWidget(self.player)
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.addWidget(self.view_label)
-        center_layout.addWidget(self.player, 1)
+        center_layout.addWidget(self.screen, 1)
 
         # 오른쪽: 출력 형식 · 자막 · 미리보기 · 내보내기
         fmt = OutputFormat()
@@ -162,7 +175,9 @@ class ExportPage(QWidget):
             self._source = None
             self._imported = ()
             self.player.release()
-            index = self.preset_combo.findData(self._default_preset) if self._default_preset else -1
+            self.screen_notice.setText("왼쪽에서 내보낼 영상을 고르세요")
+            self.screen.setCurrentWidget(self.screen_notice)
+            index =self.preset_combo.findData(self._default_preset) if self._default_preset else -1
             if index > 0:
                 self.preset_combo.setCurrentIndex(index)
                 self._apply_preset(index)
@@ -212,8 +227,11 @@ class ExportPage(QWidget):
         self._source = self.list.item(row).data(Qt.ItemDataRole.UserRole)
         self.player.release()
         if self._source == TIMELINE:
-            self.view_label.setText("컷편집 타임라인 — [저해상도 미리보기]로 자막까지 합친 결과를 먼저 보세요")
+            self.view_label.setText("컷편집 타임라인")
+            self.screen_notice.setText(TIMELINE_NOTICE)
+            self.screen.setCurrentWidget(self.screen_notice)
         else:
+            self.screen.setCurrentWidget(self.player)
             self.player.open(self._sources.media(self._path()), play=False)
             self.view_label.setText(f"원본: {self._path().name}")
         self._update_controls()
@@ -256,7 +274,10 @@ class ExportPage(QWidget):
             self.worker.request_timeline(kind, self._project, self._workspace, self._sources, self._output(kind),
                                          self._format(), self.subtitle_check.isChecked())
         else:
-            self.worker.request(kind, self._path(), self._output(kind), self._format(), None)
+            from ks_studio.services.grade import source_cube
+
+            grade = source_cube(self._workspace, self._source)  # 색 보정 탭에서 이 영상에 정한 색
+            self.worker.request(kind, self._path(), self._output(kind), self._format(), None, grade)
         self._update_controls()
 
     def _on_progress(self, kind: str, ratio: float) -> None:
@@ -271,12 +292,14 @@ class ExportPage(QWidget):
             self.status.setText("저해상도 미리보기 — 최종 파일과 같은 비율·자막입니다")
             name = "컷편집 타임라인" if self._source == TIMELINE else self._path().name
             self.view_label.setText(f"저해상도 미리보기 (짧은 변 800px): {name}")
+            self.screen.setCurrentWidget(self.player)
             self.player.open(output)
         else:
             size_mb = output.stat().st_size / 1e6
             self.status.setText(f"완성: {output.name} ({size_mb:.0f}MB)")
             self.message.emit(f"내보내기 완성: {output.name}", INFO)
             self.view_label.setText(f"내보낸 파일: {output.name}")
+            self.screen.setCurrentWidget(self.player)
             self.player.open(output, play=False)
 
     def _on_failed(self, kind: str, reason: str) -> None:

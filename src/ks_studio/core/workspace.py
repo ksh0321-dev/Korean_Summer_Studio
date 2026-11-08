@@ -11,6 +11,7 @@
 <root>/exports/final/                      내보내기 탭의 최종 영상
 <root>/ai/<이름>_보정.mp4                    AI 보정본 (워크스페이스에 녹화본처럼 보인다)
 <root>/ai/settings.json                    AI 보정 설정 (원본마다)
+<root>/color/settings.json                 색 보정 설정 (원본마다 — 원본 파일은 그대로, 보여 줄 때·내보낼 때 입힌다)
 <root>/.test/test.mkv, test.mp4            5초 테스트 녹화 (매번 덮어씀)
 <root>/.test/sync_calibration.mp4          박수 싱크 보정용 녹화 (매번 덮어씀)
 """
@@ -59,6 +60,14 @@ class Workspace:
     @property
     def ai_settings_file(self) -> Path:
         return self.ai_dir / "settings.json"
+
+    @property
+    def color_dir(self) -> Path:
+        return self.root / "color"
+
+    @property
+    def color_settings_file(self) -> Path:
+        return self.color_dir / "settings.json"
 
     def beautified(self) -> list[Path]:
         """AI 보정본, 최신 순."""

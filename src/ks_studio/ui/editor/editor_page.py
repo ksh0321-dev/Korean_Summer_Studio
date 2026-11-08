@@ -406,6 +406,7 @@ class EditorPage(QWidget):
             self.player.seek(0)
         else:
             self._refresh_bin()
+            self.player.seek(self.player.position)  # 색 보정 탭에서 바꾼 색으로 지금 장면을 다시 그린다
 
     def deactivate(self) -> None:
         self._active = False

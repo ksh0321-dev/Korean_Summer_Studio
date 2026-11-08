@@ -135,12 +135,19 @@ def export_plan(path: Path, fmt: OutputFormat, short: int | None = None) -> Plan
 
 
 def export_video(path: Path, output: Path, fmt: OutputFormat, subs: Subtitles | None, on_progress=None,
-                 cancel: threading.Event | None = None, preview: bool = False) -> Plan:
-    """path → output. 자막이 있으면 굽는다. preview면 짧은 변 PREVIEW_SHORT·빠른 인코더. 멈추면 Cancelled."""
+                 cancel: threading.Event | None = None, preview: bool = False, grade: Path | None = None) -> Plan:
+    """path → output. 자막이 있으면 굽는다. grade = 색 보정 .cube (색 보정 탭). preview면 짧은 변 PREVIEW_SHORT·빠른 인코더.
+    멈추면 Cancelled."""
     plan = export_plan(path, fmt, PREVIEW_SHORT if preview else None)
     burner = CaptionBurner(subs, plan.size, plan.fps) if subs is not None and subs.cues else None
+    process = burner
+    if grade is not None:
+        from ks_studio.services.grade import LutFilter
+
+        lut = LutFilter(grade)
+        process = (lambda f: burner(lut.frame(f))) if burner is not None else lut.frame
     encoders = PREVIEW_ENCODERS if preview else ENCODERS[fmt.codec]
-    make_optimized(path, output, plan, on_progress, process=burner, encoders=encoders, cancel=cancel)
+    make_optimized(path, output, plan, on_progress, process=process, encoders=encoders, cancel=cancel)
     return plan
 
 
@@ -239,9 +246,11 @@ class ExportWorker(QObject):
         self.busy: str | None = None
         threading.Thread(target=self._worker, daemon=True, name="export").start()
 
-    def request(self, kind: str, path: Path, output: Path, fmt: OutputFormat, subs: Subtitles | None) -> None:
-        """영상 파일 하나를 내보낸다."""
-        self.request_job(kind, output, lambda progress, cancel: export_video(path, output, fmt, subs, progress, cancel, kind == "preview"))
+    def request(self, kind: str, path: Path, output: Path, fmt: OutputFormat, subs: Subtitles | None,
+                grade: Path | None = None) -> None:
+        """영상 파일 하나를 내보낸다 (grade = 색 보정 .cube)."""
+        self.request_job(kind, output, lambda progress, cancel: export_video(path, output, fmt, subs, progress, cancel,
+                                                                            kind == "preview", grade))
 
     def request_timeline(self, kind: str, project: Project, workspace: Workspace, sources: SourceCache,
                          output: Path, fmt: OutputFormat, with_subtitles: bool) -> None:

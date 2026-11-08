@@ -38,6 +38,7 @@ from ks_studio.services.devices import DeviceMonitor, find_camera, find_micropho
 from ks_studio.services.sources import SourceCache
 from ks_studio.ui.about_dialog import AboutDialog, UpdateChecker
 from ks_studio.ui.beautify.beautify_page import BeautifyPage
+from ks_studio.ui.color.color_page import ColorPage
 from ks_studio.ui.editor.editor_page import EditorPage
 from ks_studio.ui.export.export_page import ExportPage
 from ks_studio.ui.recorder.close_wait_dialog import CloseWaitDialog
@@ -99,6 +100,7 @@ class MainWindow(QMainWindow):
         self._sources = SourceCache(self)
         self.recorder_page = RecorderPage(devices)
         self.editor_page = EditorPage(self._sources)
+        self.color_page = ColorPage(self._sources, self.editor_page.optimizer)
         self.beautify_page = BeautifyPage(self._sources, self.editor_page.optimizer)
         self.export_page = ExportPage(self._sources)
         self.export_page.set_default_preset(settings.default_export_preset)
@@ -124,6 +126,7 @@ class MainWindow(QMainWindow):
         pages = [
             ("녹화", self.recorder_page),
             ("컷편집", self.editor_page),
+            ("색 보정", self.color_page),
             ("AI 보정", self.beautify_page),
             ("내보내기", self.export_page),
         ]
@@ -160,7 +163,7 @@ class MainWindow(QMainWindow):
 
         self.status_bar = StatusBar()
         self.setStatusBar(self.status_bar)
-        for page in (self.recorder_page, self.editor_page, self.beautify_page, self.export_page):
+        for page in (self.recorder_page, self.editor_page, self.color_page, self.beautify_page, self.export_page):
             page.message.connect(self.status_bar.show_message)
             page.indicator.connect(self.status_bar.set_indicator)
         self._log_bridge = LogBridge(self)  # 경고·오류 로그도 상태 표시줄로
@@ -186,6 +189,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         """편집을 저장하고, 녹화 중이면 멈추고, 마무리할 녹화가 남았으면 끝날 때까지 기다린 뒤 닫는다 (취소 불가)."""
         self.editor_page.deactivate()
+        self.color_page.deactivate()
         self.beautify_page.deactivate()
         self.export_page.deactivate()
         if self.recorder_page.begin_close():
@@ -212,6 +216,8 @@ class MainWindow(QMainWindow):
             self.recorder_page.deactivate()
         if current is not self.editor_page:
             self.editor_page.deactivate()
+        if current is not self.color_page:
+            self.color_page.deactivate()
         if current is not self.beautify_page:
             self.beautify_page.deactivate()
         if current is not self.export_page:
@@ -220,6 +226,8 @@ class MainWindow(QMainWindow):
             self.recorder_page.activate(self.settings, self._workspace())
         elif current is self.editor_page:
             self.editor_page.activate(self.settings, self._workspace())
+        elif current is self.color_page:
+            self.color_page.activate(self._workspace())
         elif current is self.beautify_page:
             self.beautify_page.activate(self._workspace())
         elif current is self.export_page:
