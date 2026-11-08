@@ -28,6 +28,7 @@ from ks_studio.services.accel import hardware_encoders
 from ks_studio.services.optimize import Cancelled, Plan, add_video_stream, inspect, make_optimized
 from ks_studio.services.render import TimelineRenderer, canvas_size
 from ks_studio.services.sources import AUDIO_RATE, SourceCache
+from ks_studio.services.yuv import KEEP_MATRIX, SWS_FLAGS
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ PRESETS = {
 RESOLUTIONS = {1080: "1080p", 720: "720p", 1440: "1440p", 2160: "2160p (4K)", 0: "원본 그대로"}  # 짧은 변
 CODECS = {"h264": "MP4 · H.264 (어디서나 재생)", "hevc": "MP4 · H.265 (같은 화질에 더 작은 파일)"}
 PREVIEW_SHORT = 800  # 저해상도 미리보기의 짧은 변
+QUALITIES = {"high": "높음 (기본)", "best": "최고 (원본과 거의 같게 · 파일 약 2배)"}
 # 배포용: 화질 목표(cq/crf)로 — 인스타그램·유튜브가 다시 압축하므로 원본은 넉넉하게. GPU가 없으면 CPU 인코더
 ENCODERS = {
     "h264": (
@@ -64,6 +66,23 @@ ENCODERS = {
         ("libx265", {"preset": "fast", "crf": "22"}),
     ),
 }
+# 최고 화질: 화질 목표를 더 높게 (cq/crf가 낮을수록 원본에 가깝고 파일이 크다). 4K 60fps도 막히지 않게 최대 비트레이트를 넉넉히
+BEST_ENCODERS = {
+    "h264": (
+        ("h264_nvenc", {"preset": "p7", "rc": "vbr", "cq": "14", "b": "0", "maxrate": "150M", "bufsize": "300M"}),
+        *hardware_encoders("h264", "80M"),
+        ("libx264", {"preset": "slow", "crf": "14"}),
+    ),
+    "hevc": (
+        ("hevc_nvenc", {"preset": "p7", "rc": "vbr", "cq": "17", "b": "0", "maxrate": "120M", "bufsize": "240M"}),
+        *hardware_encoders("hevc", "60M"),
+        ("libx265", {"preset": "medium", "crf": "17"}),
+    ),
+}
+
+
+def encoders_for(fmt: "OutputFormat") -> tuple:
+    return (BEST_ENCODERS if fmt.quality == "best" else ENCODERS)[fmt.codec]
 PREVIEW_ENCODERS = (
     ("h264_nvenc", {"preset": "p1", "rc": "vbr", "cq": "28", "b": "0", "maxrate": "20M", "bufsize": "40M", "bf": "0"}),
     *hardware_encoders("h264", "6M"),
@@ -79,12 +98,14 @@ class OutputFormat:
     codec: str = "h264"
     loudness: bool = False  # 소리 크기 맞추기 (유튜브 기준 -14 LUFS) — 컷편집 타임라인 내보내기에서
     denoise: bool = False  # 잡음 줄이기 (바람·웅웅 소리)
+    quality: str = "high"  # QUALITIES의 키 — best는 압축을 덜 해서 원본과 거의 같다 (실측: PSNR +3dB, 파일 약 1.7배)
 
     @property
     def tag(self) -> str:
         """파일 이름에 붙일 표시 (예: 9x16_1080p)."""
         ratio = "원본비율" if self.ratio == "original" else self.ratio.replace(":", "x")
-        return f"{ratio}_{self.short}p" if self.short else ratio
+        tag = f"{ratio}_{self.short}p" if self.short else ratio
+        return f"{tag}_최고화질" if self.quality == "best" else tag
 
 
 def _even(value: float) -> int:
@@ -106,15 +127,16 @@ def target_size(source: tuple[int, int], fmt: OutputFormat, short: int | None = 
 def fit_filters(source: tuple[int, int], target: tuple[int, int], fit: str) -> tuple[tuple[str, str], ...]:
     """source를 target 칸에: crop = 칸을 꽉 채우고 넘치는 가운데 바깥을 자름, pad = 다 보이게 줄이고 검은 여백."""
     (w, h), (tw, th) = source, target
+    keep = f"flags={SWS_FLAGS}:{KEEP_MATRIX}"  # 정확한 반올림 · 색 규격 그대로 (services.yuv — 안 그러면 1~1.5단계 어두워졌다)
     if abs(w / h - tw / th) < 0.01:
-        return (("scale", f"{tw}:{th}"),)
+        return (("scale", f"{tw}:{th}:{keep}"),)
     if fit == "crop":
         scale = max(tw / w, th / h)
         sw, sh = max(tw, _even(math.ceil(w * scale))), max(th, _even(math.ceil(h * scale)))
-        return (("scale", f"{sw}:{sh}"), ("crop", f"{tw}:{th}:{(sw - tw) // 2}:{(sh - th) // 2}"))
+        return (("scale", f"{sw}:{sh}:{keep}"), ("crop", f"{tw}:{th}:{(sw - tw) // 2}:{(sh - th) // 2}"))
     scale = min(tw / w, th / h)
     sw, sh = min(tw, _even(w * scale)), min(th, _even(h * scale))
-    return (("scale", f"{sw}:{sh}"), ("pad", f"{tw}:{th}:{(tw - sw) // 2}:{(th - sh) // 2}:black"))
+    return (("scale", f"{sw}:{sh}:{keep}"), ("pad", f"{tw}:{th}:{(tw - sw) // 2}:{(th - sh) // 2}:black"))
 
 
 def export_plan(path: Path, fmt: OutputFormat, short: int | None = None) -> Plan:
@@ -146,7 +168,7 @@ def export_video(path: Path, output: Path, fmt: OutputFormat, subs: Subtitles | 
 
         lut = LutFilter(grade)
         process = (lambda f: burner(lut.frame(f))) if burner is not None else lut.frame
-    encoders = PREVIEW_ENCODERS if preview else ENCODERS[fmt.codec]
+    encoders = PREVIEW_ENCODERS if preview else encoders_for(fmt)
     make_optimized(path, output, plan, on_progress, process=process, encoders=encoders, cancel=cancel)
     return plan
 
@@ -179,7 +201,7 @@ def export_timeline(project: Project, workspace: Workspace, sources: SourceCache
     tmp = output.with_name(output.name + ".part")
     try:
         with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as dst:
-            video = add_video_stream(dst, size, fps, PREVIEW_ENCODERS if preview else ENCODERS[fmt.codec])
+            video = add_video_stream(dst, size, fps, PREVIEW_ENCODERS if preview else encoders_for(fmt))
             audio = dst.add_stream("aac", rate=AUDIO_RATE, layout="mono")
             audio.bit_rate = AUDIO_BITRATE
             graph = av.filter.Graph()

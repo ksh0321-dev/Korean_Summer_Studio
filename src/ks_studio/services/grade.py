@@ -92,8 +92,13 @@ class LutFilter:
                 source = graph.add_buffer(width=frame.width, height=frame.height, format=frame.format.name,
                                           time_base=Fraction(1, 30))
                 # 경로는 이름 붙인 옵션으로 (필터 글로 쓰면 C: 같은 콜론을 따로 막아야 한다)
-                graph.link_nodes(source, graph.add("lut3d", file=str(self.cube)), graph.add("format", frame.format.name),
-                                 graph.add("buffersink")).configure()
+                from ks_studio.services.yuv import scale_args
+
+                # 형식 바꾸기는 정확한 반올림·같은 색 규격으로 (기본값은 화면이 1단계쯤 어두워지거나 밝아졌다 — services.yuv)
+                fmt = frame.format.name
+                graph.link_nodes(source, graph.add("scale", scale_args(fmt, "gbrp", colorspace=frame.colorspace, source_height=frame.height)), graph.add("format", "gbrp"),
+                                 graph.add("lut3d", file=str(self.cube)), graph.add("scale", scale_args("gbrp", fmt, source_height=frame.height)),
+                                 graph.add("format", fmt), graph.add("buffersink")).configure()
                 self._graphs[key] = graph
             pts, time_base = frame.pts, frame.time_base
             frame.pts = 0

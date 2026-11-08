@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
 from ks_studio.services.accel import open_folder
-from ks_studio.services.deliver import CODECS, FITS, PRESETS, RATIOS, RESOLUTIONS, ExportWorker, OutputFormat
+from ks_studio.services.deliver import CODECS, FITS, PRESETS, QUALITIES, RATIOS, RESOLUTIONS, ExportWorker, OutputFormat
 from ks_studio.services.sources import SourceCache
 from ks_studio.ui.editor.media_bin import VIDEO_FILTER
 from ks_studio.ui.widgets.clip_player import ClipPlayer
@@ -116,11 +116,15 @@ class ExportPage(QWidget):
         self.fit_combo = _combo(FITS, fmt.fit)
         self.size_combo = _combo(RESOLUTIONS, fmt.short)
         self.codec_combo = _combo(CODECS, fmt.codec)
+        self.quality_combo = _combo(QUALITIES, fmt.quality)
+        self.quality_combo.setToolTip("높음: 눈으로는 원본과 구분하기 어렵고 파일이 알맞다 (유튜브·인스타는 어차피 다시 압축한다)\n"
+                                      "최고: 압축을 덜 해서 원본과 거의 같다 — 보관용·다른 프로그램에서 다시 편집할 때. 파일이 약 2배 크다")
         self.ratio_combo.currentIndexChanged.connect(self._update_controls)
         form.addRow("비율", self.ratio_combo)
         form.addRow("맞추기", self.fit_combo)
         form.addRow("해상도", self.size_combo)
         form.addRow("형식", self.codec_combo)
+        form.addRow("화질", self.quality_combo)
         # 소리 다듬기 (컷편집 타임라인을 내보낼 때)
         self.loudness_check = QCheckBox("소리 크기 맞추기 (유튜브 기준 -14 LUFS)")
         self.loudness_check.setToolTip("작게 녹음된 영상은 키우고 너무 큰 영상은 줄여, 플랫폼이 다시 줄이거나 키우지 않게 맞춥니다")
@@ -243,7 +247,7 @@ class ExportPage(QWidget):
     def _format(self) -> OutputFormat:
         return OutputFormat(self.ratio_combo.currentData(), self.fit_combo.currentData(),
                             self.size_combo.currentData(), self.codec_combo.currentData(),
-                            self.loudness_check.isChecked(), self.denoise_check.isChecked())
+                            self.loudness_check.isChecked(), self.denoise_check.isChecked(), self.quality_combo.currentData())
 
     def _apply_preset(self, index: int) -> None:
         key = self.preset_combo.itemData(index)

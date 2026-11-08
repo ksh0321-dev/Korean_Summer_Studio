@@ -32,9 +32,13 @@ def test_target_sizes():
 
 
 def test_fit_filters_crop_and_pad():
-    assert fit_filters((1920, 1080), (1280, 720), "crop") == (("scale", "1280:720"),)
-    assert fit_filters((1920, 1080), (1080, 1920), "crop") == (("scale", "3414:1920"), ("crop", "1080:1920:1167:0"))
-    assert fit_filters((1920, 1080), (1080, 1920), "pad") == (("scale", "1080:608"), ("pad", "1080:1920:0:656:black"))
+    def sizes(filters):  # scale 뒤의 정확한 반올림·색 규격 옵션은 빼고 크기만
+        return tuple((name, args.split(":flags=")[0]) for name, args in filters)
+
+    assert sizes(fit_filters((1920, 1080), (1280, 720), "crop")) == (("scale", "1280:720"),)
+    assert sizes(fit_filters((1920, 1080), (1080, 1920), "crop")) == (("scale", "3414:1920"), ("crop", "1080:1920:1167:0"))
+    assert sizes(fit_filters((1920, 1080), (1080, 1920), "pad")) == (("scale", "1080:608"), ("pad", "1080:1920:0:656:black"))
+    assert "in_color_matrix=bt709:out_color_matrix=bt709" in fit_filters((1920, 1080), (1280, 720), "crop")[0][1]
 
 
 def make_wide(path, seconds=1.0, fps=30):

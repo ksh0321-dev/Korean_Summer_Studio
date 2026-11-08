@@ -19,6 +19,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from ks_studio.services.foreground import yield_to_playback
+from ks_studio.services.yuv import to_rgb
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ def fit_rgb(frame: av.VideoFrame, width: int, height: int) -> np.ndarray:
     fw, fh = max(2, round(frame.width * scale) // 2 * 2), max(2, round(frame.height * scale) // 2 * 2)
     canvas = np.zeros((height, width, 3), np.uint8)
     y0, x0 = (height - fh) // 2, (width - fw) // 2
-    canvas[y0 : y0 + fh, x0 : x0 + fw] = frame.reformat(width=fw, height=fh, format="rgb24").to_ndarray()
+    canvas[y0 : y0 + fh, x0 : x0 + fw] = to_rgb(frame, fw, fh)  # 정확한 반올림 (services.yuv)
     return canvas
 
 

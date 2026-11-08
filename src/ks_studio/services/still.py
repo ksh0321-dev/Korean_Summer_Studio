@@ -9,6 +9,8 @@ from pathlib import Path
 import av
 import numpy as np
 
+from ks_studio.services.yuv import from_rgb, to_rgb
+
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 PHOTO_SECONDS = 5.0  # 사진 한 장의 기본 길이 (타임라인에서 줄이고 늘인다 — 늘이려면 처음부터 길게)
 PHOTO_FPS = 30
@@ -43,7 +45,7 @@ def image_to_video(path: Path, output: Path, seconds: float = PHOTO_SECONDS, fps
     h, w = rgb.shape[:2]
     scale = min(1.0, PHOTO_LONG_SIDE / max(w, h))
     size = (max(2, round(w * scale) // 2 * 2), max(2, round(h * scale) // 2 * 2))
-    frame = av.VideoFrame.from_ndarray(rgb, format="rgb24").reformat(*size, format="yuv420p")
+    frame = from_rgb(rgb, "yuv420p", *size)
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(output.name + ".part")
     try:
@@ -83,5 +85,5 @@ def timeline_still(project, workspace, sources, frame: int, with_overlays: bool 
         if with_overlays and (project.subtitles.cues or project.texts):
             image.pts = t
             image = OverlayBurner(project.subtitles, project.texts, size, project.fps)(image)
-        return image.to_ndarray(format="rgb24")
+        return to_rgb(image)
     raise ValueError("타임라인이 비어 있습니다")

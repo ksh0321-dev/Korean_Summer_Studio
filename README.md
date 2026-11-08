@@ -4,7 +4,7 @@
 녹화부터 컷편집, 자막, AI 얼굴·몸매 보정, 쇼츠·릴스용 내보내기까지 한 프로그램에서 합니다.
 단계마다 따로 쓸 수 있습니다 (휴대폰으로 찍은 영상을 가져와 편집만 해도 됩니다).
 
-- 지금 버전: **0.3.0** — 바뀐 점은 [패치노트](docs/CHANGELOG.md), 개발 과정은 [개발일지](docs/devlog/)
+- 지금 버전: **0.3.1** — 바뀐 점은 [패치노트](docs/CHANGELOG.md), 개발 과정은 [개발일지](docs/devlog/)
 - Python 3.12 · PySide6(Qt) · PyAV(FFmpeg) · ONNX Runtime(GPU)
 
 ## 무엇을 하나

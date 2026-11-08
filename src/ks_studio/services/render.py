@@ -22,6 +22,7 @@ import numpy as np
 from ks_studio.core.color import grade, shape
 from ks_studio.core.project import MAIN_TRACK, Clip, Project, Sound
 from ks_studio.core.workspace import Workspace
+from ks_studio.services.yuv import convert, from_rgb, to_rgb
 from ks_studio.services.sources import AUDIO_RATE, SourceCache, fit_rgb
 
 log = logging.getLogger(__name__)
@@ -215,7 +216,7 @@ class TimelineRenderer:
                     if not segment.above:
                         yield t, base, audio_at(t)
                         continue
-                    canvas = base.to_ndarray(format="rgb24").copy()
+                    canvas = to_rgb(base).copy()
                     for layer in segment.above:
                         image = frame_of(layer.clip, layer.clip_start, t, True)
                         alpha = layer.clip.opacity
@@ -223,7 +224,7 @@ class TimelineRenderer:
                             alpha *= (t - layer.clip_start + 0.5) / layer.dissolve_frames
                         self._paste(canvas, image, layer.clip, min(1.0, alpha))
                     frame = av.VideoFrame.from_ndarray(canvas, format="rgb24")
-                    yield t, frame if self._pix_fmt == "rgb24" else frame.reformat(format=self._pix_fmt), audio_at(t)
+                    yield t, convert(frame, self._pix_fmt), audio_at(t)
         finally:
             for entry in decoders.values():
                 entry[0].close()
@@ -269,7 +270,7 @@ class TimelineRenderer:
         cube = self._source_cube(clip.source)
         if not (clip.shaped or clip.graded or cube):
             return decoded
-        rgb = decoded.to_ndarray(format="rgb24")
+        rgb = to_rgb(decoded)
         if cube is not None:
             rgb = self._apply_lut(rgb, str(cube))
         if not (clip.shaped or clip.graded):
@@ -308,7 +309,7 @@ class TimelineRenderer:
         if clip.covers:
             return fit_rgb(decoded, *self._size)
         _, _, w, h = layer_rect(decoded.width, decoded.height, self._size, clip)
-        return decoded.reformat(width=w, height=h, format="rgb24").to_ndarray()
+        return to_rgb(decoded, w, h)
 
     def _blank_layer(self, clip: Clip) -> np.ndarray:
         return np.zeros((2, 2, 3), np.uint8)
@@ -368,10 +369,9 @@ class TimelineRenderer:
         """출력 크기에 맞춘다. 비율이 같으면 그대로 늘이고, 다르면 비율을 지켜 가운데에 놓고 검은 여백을 둔다."""
         w, h = self._size
         if decoded.width * h == decoded.height * w:
-            return decoded.reformat(width=w, height=h, format=self._pix_fmt)
-        frame = av.VideoFrame.from_ndarray(fit_rgb(decoded, w, h), format="rgb24")
-        return frame if self._pix_fmt == "rgb24" else frame.reformat(format=self._pix_fmt)
+            return convert(decoded, self._pix_fmt, w, h)
+        return from_rgb(fit_rgb(decoded, w, h), self._pix_fmt)
 
     def _black(self) -> av.VideoFrame:
         w, h = self._size
-        return av.VideoFrame.from_ndarray(np.zeros((h, w, 3), np.uint8), format="rgb24").reformat(format=self._pix_fmt)
+        return from_rgb(np.zeros((h, w, 3), np.uint8), self._pix_fmt)
