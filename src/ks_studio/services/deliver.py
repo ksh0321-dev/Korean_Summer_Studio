@@ -26,6 +26,7 @@ from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
 from ks_studio.services.accel import hardware_encoders
 from ks_studio.services.optimize import Cancelled, Plan, add_video_stream, inspect, make_optimized
+from ks_studio.services.timeline_beauty import TimelineBeauty
 from ks_studio.services.render import TimelineRenderer, canvas_size
 from ks_studio.services.sources import AUDIO_RATE, SourceCache
 from ks_studio.services.yuv import KEEP_MATRIX, SWS_FLAGS
@@ -192,7 +193,17 @@ def export_timeline(project: Project, workspace: Workspace, sources: SourceCache
     pick = max if fmt.fit == "crop" else min
     scale = min(1.0, pick(size[0] / canvas[0], size[1] / canvas[1]))
     drawn = (_even(canvas[0] * scale), _even(canvas[1] * scale))
-    renderer = TimelineRenderer(project, workspace, sources, drawn, "yuv420p")
+    # AI 보정 (AI 보정 탭 설정): 타임라인이 쓰는 원본 구간만 얼굴 분석 → 프레임마다 내보낼 크기로 입힌다
+    beauty = TimelineBeauty(project, workspace, sources)
+    share = 0.0  # 진행률 중 얼굴 분석 몫
+    if beauty.active:
+        frames_to_analyze = beauty.analysis_needed()
+        share = min(0.5, frames_to_analyze / max(1, frames_to_analyze + 2 * project.duration)) if frames_to_analyze else 0.0
+        beauty.prepare((lambda r: on_progress(share * r)) if on_progress and share else None,
+                       cancel.is_set if cancel is not None else None)
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+    renderer = TimelineRenderer(project, workspace, sources, drawn, "yuv420p", beauty if beauty.active else None)
     subs = project.subtitles if with_subtitles and project.subtitles.cues else None
     burner = OverlayBurner(subs, project.texts, size, fps) if subs is not None or project.texts else None  # 글자 + 자막
     post = AudioPost(fmt.denoise, fmt.loudness) if fmt.loudness or fmt.denoise else None
@@ -239,7 +250,7 @@ def export_timeline(project: Project, workspace: Workspace, sources: SourceCache
                 for part in (post.push(samples) if post is not None else [samples]):
                     encode_audio(part)
                 if on_progress and t % 15 == 0:
-                    on_progress(min(1.0, t / total))
+                    on_progress(min(1.0, share + (1 - share) * t / total))
             graph.push(None)
             drain()
             for part in (post.flush() if post is not None else []):

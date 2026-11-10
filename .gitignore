@@ -36,6 +36,7 @@ __pycache__/
 /luts/
 /sample_video_summer/
 /sample_video_phone/
+/sample_editing_example/
 
 # 영상은 어디에 있어도 올리지 않는다 (용량)
 *.mp4

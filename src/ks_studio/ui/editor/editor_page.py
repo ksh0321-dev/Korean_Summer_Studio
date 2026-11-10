@@ -34,6 +34,15 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 
+from ks_studio.core.highlight_cuts import (
+    HighlightBook,
+    Options,
+    clip_means,
+    highlight_clips,
+    low_clips,
+    other_clips,
+    split_project,
+)
 from ks_studio.core.edits import (
     add_media,
     add_sound,
@@ -92,6 +101,13 @@ log = logging.getLogger(__name__)
 AUTOSAVE_MS = 2000
 DISSOLVE_MS = 500  # 디졸브 버튼의 기본 길이
 CAPTION_KEY = Path("<timeline>")  # 음성 인식 작업 이름 (타임라인 소리)
+HIGHLIGHT_TIP = (
+    "V1에 있는 영상을 소리·표정·움직임으로 0.5초마다 점수 매겨, 하이라이트 앞뒤(약 1초 바깥, 말이 끊긴 곳)에서 자동으로 나눕니다.\n"
+    "⚠ 분석 대상은 V1(맨 아래 영상 줄)에 있는 클립뿐입니다 — 나눌 영상을 V1에 넣으세요. 위 줄(V2~) 클립은 그대로 둡니다.\n"
+    "점수는 타임라인 맨 아래 '★ 점수' 줄에, 하이라이트 컷은 클립 위쪽 초록 띠로 보입니다.\n"
+    "처음 분석은 영상 길이에 따라 몇 분 걸릴 수 있습니다 (분석 중에 다시 누르면 멈춤). 한 번 분석한 영상은 바로 나옵니다.\n"
+    "Ctrl+Z로 되돌릴 수 있습니다 · 옆 ▾ = 분할 설정 (민감도 · 앞뒤 여유 · 최소 길이)"
+)
 REMOVE_RETRY_MS, REMOVE_RETRIES = 3000, 5  # 워크스페이스에서 뺄 때 잠깐 열려 있던 파일 다시 지우기
 
 
@@ -129,6 +145,7 @@ def _unique_path(folder: Path, name: str) -> Path:
 class EditorPage(QWidget):
     message = Signal(str, str)  # 상태 표시줄 알림 (글, 수준)
     indicator = Signal(str, str, str)  # 상태 표시줄 오른쪽 표시 (키, 글, 수준)
+    settings_edited = Signal(object)  # 여기서 바꾼 설정 (하이라이트 분할 기준) → 저장
 
     def __init__(self, sources: SourceCache, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -211,7 +228,18 @@ class EditorPage(QWidget):
         self.optimizer.failed.connect(self._on_optimize_failed)
         self._copier.failed.connect(self._on_copy_failed)
 
+        from ks_studio.services.highlight import HighlightWorker
+
+        # 하이라이트 분할: 원본별 점수 재료 (분할 버튼을 누르면 생기고, 점수 줄에 그린다)
+        self._highlights: HighlightBook | None = None
+        self._highlight_worker = HighlightWorker(sources, self)
+        self._highlight_worker.progress.connect(self._on_highlight_progress)
+        self._highlight_worker.done.connect(self._on_highlight_done)
+        self._highlight_worker.failed.connect(self._on_highlight_failed)
+        self._highlight_worker.cancelled.connect(self._on_highlight_cancelled)
+
         self._shortcuts: dict[str, tuple] = {}  # 이름 → (동작, 기본 키, 설명)
+        self._long_tips: dict[str, str] = {}  # 이름 → 버튼에 띄울 긴 도움말 (설정 창 단축키 표에는 짧은 설명)
         toolbar = self._build_toolbar()
 
         transport = QHBoxLayout()
@@ -299,6 +327,7 @@ class EditorPage(QWidget):
         action, _defaults, tip = self._shortcuts[name]
         action.setShortcuts([QKeySequence(k) for k in keys])
         shown = " / ".join(QKeySequence(k).toString(QKeySequence.SequenceFormat.NativeText) for k in keys)
+        tip = self._long_tips.get(name, tip)
         action.setToolTip(f"{tip}  [{shown}]" if keys else tip)
 
     def shortcut_catalog(self) -> list[tuple[str, str, tuple[str, ...]]]:
@@ -329,6 +358,27 @@ class EditorPage(QWidget):
         dissolve = a("◇ 디졸브", f"재생 헤드에서 가장 가까운 V1 클립 경계에 디졸브 넣기/빼기 ({DISSOLVE_MS}ms, 속성 창에서 길이 조절)", self._toggle_dissolve, ("T",))
         marker = a("◆ 마커", "재생 헤드에 마커 놓기/지우기 (↑/↓로 마커에도 멈춤)", lambda: self._apply(toggle_marker(self.project, self.player.position)), ("M",))
         silence = a("🔇 무음 자르기…", "V1에서 말이 없는 구간을 찾아 한 번에 잘라내기 (기준을 정하고 목록을 확인한 뒤)", self._cut_silence)
+        self.highlight_action = highlight = a("✨ 하이라이트 분할", "하이라이트 분할 (V1 영상을 하이라이트 앞뒤에서 자동으로 나누기)",
+                                              self._highlight_split)
+        self._long_tips[shortcut_name("✨ 하이라이트 분할")] = HIGHLIGHT_TIP
+        self._set_keys(shortcut_name("✨ 하이라이트 분할"), [])
+        menu = QMenu(self)
+        # 나눈 뒤에 이어 할 일 (점수가 있을 때만 — 분할을 한 번 누른 뒤)
+        self.keep_highlights_action = menu.addAction("하이라이트만 남기기", self._keep_highlights)
+        self.keep_highlights_action.setToolTip("초록 띠(하이라이트 컷)가 아닌 V1 컷을 지우고 뒤를 당깁니다 — Ctrl+Z로 되돌리기")
+        self.drop_low_action = menu.addAction("점수 낮은 컷 지우기…", self._drop_low)
+        self.drop_low_action.setToolTip("컷 평균 점수가 고른 기준보다 낮은 V1 컷을 지우고 뒤를 당깁니다")
+        self.select_highlights_action = menu.addAction("하이라이트 컷 모두 선택", self._select_highlights)
+        self.select_highlights_action.setToolTip("하이라이트 컷을 모두 선택합니다 (복사·복제·속성 바꾸기를 한 번에)")
+        menu.setToolTipsVisible(True)
+        menu.addSeparator()
+        menu.addAction("분할 설정… (민감도 · 앞뒤 여유 · 최소 길이)", self._highlight_settings)
+        self.clear_scores_action = menu.addAction("점수 줄 비우기", self._clear_highlights)
+        self._score_actions = (self.keep_highlights_action, self.drop_low_action, self.select_highlights_action,
+                               self.clear_scores_action)
+        for action in self._score_actions:
+            action.setEnabled(False)
+        highlight.setMenu(menu)
         prev_cut = a("⏮ 이전 컷", "이전 편집점(클립 시작·끝)으로", lambda: self._jump_edit(-1), ("Up",))
         next_cut = a("다음 컷 ⏭", "다음 편집점(클립 시작·끝)으로", lambda: self._jump_edit(1), ("Down",))
         snap = a("🧲 스냅", "클립을 옮기거나 자를 때 재생 헤드·클립 끝에 달라붙기", self._set_snapping, ("S",), checkable=True)
@@ -353,36 +403,49 @@ class EditorPage(QWidget):
         a("처음으로", "처음으로", lambda: self.player.seek(0), ("Home",))
         a("끝으로", "끝으로", lambda: self.player.seek(self.project.duration - 1), ("End",))
 
-        groups = [
-            [self.undo_action, self.redo_action],
-            [split_action, trim_left, trim_right, delete, self.duplicate_action],
-            [mark_in, mark_out, self.delete_range_action, self.clear_range_action, silence],
-            [dissolve, marker],
-            [prev_cut, next_cut],
-            None,  # 나머지는 오른쪽으로
-            [thumbnail, fullscreen],
-            [snap, self.link_action],
-            [zoom_out, zoom_in, fit],
+        # 두 줄: 한 줄에 다 넣으면 창이 좁을 때 오른쪽 버튼이 잘렸다
+        rows = [
+            [  # 1줄: 손으로 하는 편집
+                [self.undo_action, self.redo_action],
+                [split_action, trim_left, trim_right, delete, self.duplicate_action],
+                [mark_in, mark_out, self.delete_range_action, self.clear_range_action],
+                None,  # 나머지는 오른쪽으로
+                [thumbnail, fullscreen],
+            ],
+            [  # 2줄: 자동 기능 · 장면 · 이동 ··· 보기
+                [silence, highlight],
+                [dissolve, marker],
+                [prev_cut, next_cut],
+                None,
+                [snap, self.link_action],
+                [zoom_out, zoom_in, fit],
+            ],
         ]
         bar = QWidget()
         bar.setObjectName("editToolbar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        for i, group in enumerate(groups):
-            if group is None:
-                row.addStretch(1)
-                continue
-            if i > 0 and groups[i - 1] is not None:
-                line = QFrame()
-                line.setFrameShape(QFrame.Shape.VLine)
-                line.setObjectName("toolbarSeparator")
-                row.addWidget(line)
-            for action in group:
-                button = QToolButton()
-                button.setDefaultAction(action)
-                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Space가 버튼이 아니라 재생으로 가게
-                row.addWidget(button)
+        column = QVBoxLayout(bar)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        for groups in rows:
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            for i, group in enumerate(groups):
+                if group is None:
+                    row.addStretch(1)
+                    continue
+                if i > 0 and groups[i - 1] is not None:
+                    line = QFrame()
+                    line.setFrameShape(QFrame.Shape.VLine)
+                    line.setObjectName("toolbarSeparator")
+                    row.addWidget(line)
+                for action in group:
+                    button = QToolButton()
+                    button.setDefaultAction(action)
+                    if action.menu() is not None:  # 누르면 실행, 옆 ▾는 메뉴
+                        button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Space가 버튼이 아니라 재생으로 가게
+                    row.addWidget(button)
+            column.addLayout(row)
         return bar
 
     @property
@@ -401,6 +464,8 @@ class EditorPage(QWidget):
             self._sources.set_cache_dir(workspace.cache_dir)
             self._history = History(Project.load(workspace.project_file))
             self._set_range(None, None)
+            self._highlight_worker.cancel()
+            self._clear_highlights()  # 다른 프로젝트: 점수 줄은 다시 누를 때까지 비운다
             self._dirty = False
             self._refresh(fit=True)
             self.player.seek(0)
@@ -533,6 +598,155 @@ class EditorPage(QWidget):
         self.message.emit(f"구간 지우기: {(end - start) / self.project.fps:.2f}초를 잘라냈습니다", INFO)
         self._set_range(None, None)
         self.player.seek(start)
+
+    # ── 하이라이트 분할 ─────────────────────────────────────────
+
+    def _highlight_options(self) -> Options:
+        s = self._settings
+        return Options(s.highlight_sensitivity, s.highlight_pad, s.highlight_min_length)
+
+    def _highlight_split(self) -> None:
+        """V1 원본들을 분석(캐시가 있으면 바로)한 뒤 하이라이트 앞뒤에서 나눈다. 분석 중에 누르면 멈춘다."""
+        if self._highlight_worker.running:
+            self._highlight_worker.cancel()
+            return
+        if self._workspace is None or not self.project.clips:
+            self.message.emit("V1(맨 아래 영상 줄)에 클립이 있어야 하이라이트를 찾을 수 있습니다", INFO)
+            return
+        jobs: dict[str, Path] = {}
+        for placed in self.project.placed():
+            if placed.track == MAIN_TRACK and placed.clip.source not in jobs:
+                path = self._workspace.resolve(placed.clip.source)
+                if path.exists():
+                    jobs[placed.clip.source] = path
+        if not jobs:
+            self.message.emit("V1 클립의 원본 파일을 찾을 수 없습니다", WARNING)
+            return
+        self.highlight_action.setText("■ 분석 멈추기")
+        self.indicator.emit("highlight", "하이라이트 분석 준비 중…", INFO)
+        self._highlight_worker.start(self._workspace.cache_dir, list(jobs.items()))
+
+    def _on_highlight_progress(self, number: int, total: int, ratio: float, name: str) -> None:
+        which = f" {number}/{total}" if total > 1 else ""
+        self.indicator.emit("highlight", f"하이라이트 분석{which} · {name} {int(ratio * 100)}%", INFO)
+
+    def _highlight_finished(self) -> None:
+        self.highlight_action.setText("✨ 하이라이트 분할")
+        self.indicator.emit("highlight", "", INFO)
+
+    def _on_highlight_done(self, found: dict) -> None:
+        self._highlight_finished()
+        if self._highlights is None:
+            self._highlights = HighlightBook(options=self._highlight_options())
+        for source, signals in found.items():
+            self._highlights.add(source, signals)
+        self.timeline.set_highlights(self._highlights)
+        for action in self._score_actions:
+            action.setEnabled(True)
+        result = split_project(self.project, self._highlights)
+        if result.cuts:
+            self._apply(result.project)
+            self.message.emit(f"하이라이트 분할: 하이라이트 {result.highlights}곳 · {result.cuts}곳을 잘랐습니다 "
+                              f"(맨 아래 점수 줄 · 초록 띠 = 하이라이트 컷, Ctrl+Z로 되돌리기)", INFO)
+        elif result.highlights:
+            self.message.emit("하이라이트 분할: 이미 하이라이트 앞뒤로 나뉘어 있습니다 (점수는 맨 아래 점수 줄)", INFO)
+        else:
+            self.message.emit("뚜렷한 하이라이트를 찾지 못했습니다 — ✨ 옆 ▾ '분할 설정'에서 민감도를 올려 보세요", INFO)
+
+    def _on_highlight_failed(self, reason: str) -> None:
+        self._highlight_finished()
+        self.message.emit(f"⚠ 하이라이트 분석 실패: {reason}", ERROR)
+
+    def _on_highlight_cancelled(self) -> None:
+        self._highlight_finished()
+        self.message.emit("하이라이트 분석을 멈췄습니다 (다 끝난 영상은 저장해 두었다가 다음에 바로 씁니다)", INFO)
+
+    def _clear_highlights(self) -> None:
+        self._highlights = None
+        self.timeline.set_highlights(None)
+        for action in self._score_actions:
+            action.setEnabled(False)
+
+    def _unscored_note(self, unscored: int) -> str:
+        return f" · 점수가 없는 V1 컷 {unscored}개는 그대로 (분석하지 않은 영상)" if unscored else ""
+
+    def _keep_highlights(self) -> None:
+        """하이라이트 컷만 남기고 나머지 V1 컷(점수가 있는 것)을 지운다 — V1은 빈자리가 닫힌다."""
+        if self._highlights is None:
+            return
+        keep = highlight_clips(self.project, self._highlights)
+        if not keep.ids:
+            self.message.emit("하이라이트 컷이 없습니다 — 분할 설정에서 민감도를 올려 보세요", INFO)
+            return
+        drop = other_clips(self.project, self._highlights)
+        if not drop.ids:
+            self.message.emit("이미 하이라이트 컷만 남아 있습니다", INFO)
+            return
+        self._drop_clips(drop.ids, f"하이라이트만 남기기: 컷 {len(drop.ids)}개 · {drop.frames / self.project.fps:.1f}초를 지웠습니다"
+                         f" (하이라이트 컷 {len(keep.ids)}개 남김{self._unscored_note(drop.unscored)}) — Ctrl+Z로 되돌리기")
+
+    def _drop_low(self) -> None:
+        """기준 점수를 고르면 그보다 평균이 낮은 V1 컷을 지운다."""
+        if self._highlights is None:
+            return
+        from ks_studio.ui.editor.highlight_dialog import LowScoreDialog
+
+        book = self._highlights
+
+        def below(threshold: float) -> tuple[int, int]:
+            pick = low_clips(self.project, book, threshold)
+            return len(pick.ids), pick.frames
+
+        self.player.pause()
+        dialog = LowScoreDialog(clip_means(self.project, book), self.project.fps, below, self)
+        accepted = dialog.exec() == LowScoreDialog.DialogCode.Accepted
+        threshold = dialog.threshold()
+        dialog.deleteLater()
+        if not accepted:
+            return
+        drop = low_clips(self.project, book, threshold)
+        if drop.ids:
+            self._drop_clips(drop.ids, f"점수 낮은 컷 지우기: {threshold:.0f}점보다 낮은 컷 {len(drop.ids)}개 · "
+                                       f"{drop.frames / self.project.fps:.1f}초를 지웠습니다{self._unscored_note(drop.unscored)}"
+                                       " — Ctrl+Z로 되돌리기")
+
+    def _drop_clips(self, ids, text: str) -> None:
+        self.player.pause()
+        self._apply(delete_clips(self.project, set(ids)))  # 연동을 켰으면 위 줄도 그 장면을 따라 정리된다
+        self.player.seek(min(self.player.position, max(0, self.project.duration - 1)))
+        self.message.emit(text, INFO)
+
+    def _select_highlights(self) -> None:
+        if self._highlights is None:
+            return
+        pick = highlight_clips(self.project, self._highlights)
+        if not pick.ids:
+            self.message.emit("하이라이트 컷이 없습니다", INFO)
+            return
+        first = next(p.clip.id for p in self.project.placed() if p.clip.id in pick.ids)
+        self.timeline.set_selection(set(pick.ids), first)
+        self.message.emit(f"하이라이트 컷 {len(pick.ids)}개를 선택했습니다 ({pick.frames / self.project.fps:.1f}초)", INFO)
+
+    def _highlight_settings(self) -> None:
+        from ks_studio.ui.editor.highlight_dialog import HighlightDialog
+
+        before = self._highlight_options()
+        dialog = HighlightDialog(before, self)
+
+        def preview(options: Options) -> None:  # 점수 줄의 기준 점선·초록 띠에 바로
+            if self._highlights is not None:
+                self._highlights.set_options(options)
+                self.timeline.update()
+
+        dialog.options_changed.connect(preview)
+        accepted = dialog.exec() == HighlightDialog.DialogCode.Accepted
+        chosen = dialog.options() if accepted else before
+        dialog.deleteLater()
+        preview(chosen)
+        if accepted and chosen != before:
+            self._settings = replace(self._settings, highlight_sensitivity=round(chosen.sensitivity),
+                                     highlight_pad=chosen.pad, highlight_min_length=chosen.min_length)
+            self.settings_edited.emit(self._settings)
 
     def _cut_silence(self) -> None:
         if self._workspace is None or not self.project.clips:

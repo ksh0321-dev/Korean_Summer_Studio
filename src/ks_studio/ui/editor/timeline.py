@@ -13,6 +13,8 @@ V1은 자석식(빈틈 없음), 위 줄은 원하는 시간에 놓는다. 화면
 위 줄 클립은 아래쪽 띠에 파형을 그린다. 줄이 화면보다 많으면 줄 영역만 위아래로 스크롤된다 (눈금자·줄 이름은 고정).
 스냅(켜고 끌 수 있음): 클립을 옮기거나 끝을 끌어 자를 때 재생 헤드·다른 클립 끝에 달라붙는다.
 I/O 구간은 눈금자에 청록색 띠로, 줄 영역에는 옅은 음영으로 표시한다.
+맨 아래 '점수' 줄: 하이라이트 분할을 한 뒤에 V1 클립마다 점수 곡선과 컷 평균을 그린다 (그 전에는 비어 있다).
+하이라이트 컷은 V1 클립 위쪽에 초록 띠. 점수 줄은 줄 영역과 따로 고정 (위아래로 스크롤해도 늘 보인다).
 """
 
 from dataclasses import replace
@@ -24,6 +26,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QMenu, QScrollBar, QWidget
 
 from ks_studio.core.edits import add_track, move_clip, move_to, trim_clip
+from ks_studio.core.highlight_cuts import HighlightBook
 from ks_studio.core.project import DEFAULT_VIDEO_TRACKS, MAIN_TRACK, MIN_VIDEO_TRACKS, Clip, Placed, Project
 from ks_studio.core.subtitles import MIN_CUE, move_cue, update_cue
 from ks_studio.core.workspace import Workspace
@@ -52,6 +55,9 @@ WAVE_ON, WAVE_MUTED = QColor("#2ecc71"), QColor("#5c5c66")
 HIDDEN_SHADE = QColor(22, 22, 26, 170)
 ADD_BUTTON = QRectF(4, 2, HEADER_W - 8, TICKS_H - 4)  # 왼쪽 위 [+ 줄]
 SCROLLBAR_W = 12
+SCORE_H = 30  # 맨 아래 점수 줄
+SCORE_HIGH, SCORE_SPIKE, SCORE_LOW = QColor("#2ecc71"), QColor("#6f9cc8"), QColor("#3d5a78")  # 하이라이트 / 기준은 넘었지만 짧게 튐 / 그 밖
+HIGHLIGHT_STRIPE = 4  # 하이라이트 컷 V1 클립 위쪽 초록 띠 두께
 AUTOSCROLL_PX = 12  # 끌다가 위아래 끝에서 이 거리 안이면 자동 스크롤
 
 
@@ -80,7 +86,7 @@ class TimelineWidget(QWidget):
 
     def __init__(self, sources: SourceCache, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(RULER_H + content_height(DEFAULT_VIDEO_TRACKS))
+        self.setMinimumHeight(RULER_H + content_height(DEFAULT_VIDEO_TRACKS) + SCORE_H)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self._sources = sources
@@ -104,6 +110,7 @@ class TimelineWidget(QWidget):
         self.snapping = True
         self.range_in: int | None = None  # I/O 구간 [range_in, range_out)
         self.range_out: int | None = None
+        self._highlights: HighlightBook | None = None  # 하이라이트 분할을 하면 생긴다 (점수 줄·초록 띠)
         self._scrollbar = QScrollBar(Qt.Orientation.Vertical, self)
         self._scrollbar.valueChanged.connect(lambda value: self._set_vscroll(self._max_vscroll() - value))
 
@@ -123,6 +130,11 @@ class TimelineWidget(QWidget):
         span = max(self._project.duration, self._project.fps * 10)
         self._ppf = max(MIN_PPF, min(MAX_PPF, (self.width() - LEFT - 12) / span))
         self._scroll = 0.0
+        self.update()
+
+    def set_highlights(self, book: HighlightBook | None) -> None:
+        """점수 줄에 그릴 점수 (None이면 비운다)."""
+        self._highlights = book
         self.update()
 
     def set_range(self, start: int | None, end: int | None) -> None:
@@ -163,18 +175,22 @@ class TimelineWidget(QWidget):
     def _frame_at(self, x: float) -> float:
         return self._scroll + (x - LEFT) / self._ppf
 
+    def _tracks_bottom(self) -> float:
+        """줄 영역의 아래 끝 (그 아래는 점수 줄)."""
+        return self.height() - SCORE_H
+
     def _max_vscroll(self) -> int:
-        return max(0, content_height(self._project.video_tracks) - (self.height() - RULER_H))
+        return max(0, content_height(self._project.video_tracks) - int(self._tracks_bottom() - RULER_H))
 
     def _set_vscroll(self, value: float) -> None:
         self._vscroll = int(max(0, min(value, self._max_vscroll())))
         top = self._max_vscroll()
         self._scrollbar.blockSignals(True)
         self._scrollbar.setRange(0, top)
-        self._scrollbar.setPageStep(max(1, self.height() - RULER_H))
+        self._scrollbar.setPageStep(max(1, int(self._tracks_bottom() - RULER_H)))
         self._scrollbar.setValue(top - self._vscroll)
         self._scrollbar.blockSignals(False)
-        self._scrollbar.setGeometry(QRect(self.width() - SCROLLBAR_W, RULER_H, SCROLLBAR_W, self.height() - RULER_H))
+        self._scrollbar.setGeometry(QRect(self.width() - SCROLLBAR_W, RULER_H, SCROLLBAR_W, int(self._tracks_bottom() - RULER_H)))
         self._scrollbar.setVisible(top > 0)
         self.update()
 
@@ -182,7 +198,7 @@ class TimelineWidget(QWidget):
         """끄는 중 위아래 끝에 가까우면 그쪽으로 스크롤."""
         if y < RULER_H + AUTOSCROLL_PX:
             self._set_vscroll(self._vscroll + 8)
-        elif y > self.height() - AUTOSCROLL_PX:
+        elif y > self._tracks_bottom() - AUTOSCROLL_PX:
             self._set_vscroll(self._vscroll - 8)
 
     def resizeEvent(self, event) -> None:
@@ -198,8 +214,8 @@ class TimelineWidget(QWidget):
         return self._row_top(MAIN_TRACK) + ROW_H + GAP
 
     def _track_at(self, y: float) -> int | None:
-        """y에 있는 줄. A1(오디오) 줄은 V1 클립의 일부다. 눈금자면 None."""
-        if y < RULER_H:
+        """y에 있는 줄. A1(오디오) 줄은 V1 클립의 일부다. 눈금자·점수 줄이면 None."""
+        if y < RULER_H or y >= self._tracks_bottom():
             return None
         if y >= self._audio_top():
             return MAIN_TRACK
@@ -219,7 +235,7 @@ class TimelineWidget(QWidget):
         return QRectF(x, self._row_top(track) + ROW_H - BUTTON_H - 4, BUTTON_W, BUTTON_H)
 
     def _header_hit(self, x: float, y: float) -> tuple[int, str] | None:
-        if y < RULER_H:  # 눈금자 뒤로 스크롤된 버튼은 누를 수 없다
+        if y < RULER_H or y >= self._tracks_bottom():  # 눈금자·점수 줄 뒤로 스크롤된 버튼은 누를 수 없다
             return None
         for track in range(1, self._project.video_tracks + 1):
             for kind in ("hide", "mute"):
@@ -293,7 +309,8 @@ class TimelineWidget(QWidget):
 
     def _paint_content(self, painter: QPainter) -> None:
         painter.fillRect(self.rect(), QColor("#16161a"))
-        painter.setClipRect(QRectF(HEADER_W, RULER_H, self.width(), self.height()))  # 줄 영역: 스크롤돼도 눈금자 위로 안 그린다
+        tracks = QRectF(HEADER_W, RULER_H, self.width(), self._tracks_bottom() - RULER_H)
+        painter.setClipRect(tracks)  # 줄 영역: 스크롤돼도 눈금자·점수 줄 위로 안 그린다
         for track in range(1, self._project.video_tracks + 1):
             painter.fillRect(QRectF(HEADER_W, self._row_top(track), self.width(), ROW_H), QColor("#1c1c22"))
         painter.fillRect(QRectF(HEADER_W, self._audio_top(), self.width(), AUDIO_H), QColor("#1a1d1b"))
@@ -314,6 +331,7 @@ class TimelineWidget(QWidget):
         if range_x is not None:
             painter.fillRect(QRectF(range_x[0], RULER_H, range_x[1] - range_x[0], self.height()), RANGE_SHADE)
         painter.setClipRect(QRectF(HEADER_W, 0, self.width(), self.height()))
+        self._paint_scores(painter, project)
         self._paint_ruler(painter)
         self._paint_markers(painter)
         self._paint_captions(painter, project)
@@ -343,7 +361,8 @@ class TimelineWidget(QWidget):
         painter.drawText(QRectF(0, TICKS_H, HEADER_W, CAPTION_H), Qt.AlignmentFlag.AlignCenter, "자막")
         painter.drawText(QRectF(0, TEXT_TOP, HEADER_W, TEXT_H), Qt.AlignmentFlag.AlignCenter, "T 글자")
         painter.drawText(QRectF(0, SOUND_TOP, HEADER_W, SOUND_H), Qt.AlignmentFlag.AlignCenter, "♪ 소리")
-        painter.setClipRect(QRectF(0, RULER_H, HEADER_W, self.height()))
+        painter.drawText(QRectF(0, self._tracks_bottom(), HEADER_W, SCORE_H), Qt.AlignmentFlag.AlignCenter, "★ 점수")
+        painter.setClipRect(QRectF(0, RULER_H, HEADER_W, self._tracks_bottom() - RULER_H))
         painter.drawText(QRectF(0, self._audio_top(), HEADER_W, AUDIO_H), Qt.AlignmentFlag.AlignCenter, "A1")
         for track in range(1, self._project.video_tracks + 1):
             painter.setPen(QColor("#9a9aa3"))
@@ -608,6 +627,10 @@ class TimelineWidget(QWidget):
         self._paint_fades(painter, project, clip, audio)
         if placed.track in project.hidden:
             painter.fillRect(picture, HIDDEN_SHADE)
+        if main and self._highlights is not None:
+            info = self._highlights.clip(clip)
+            if info is not None and info.is_highlight:
+                painter.fillRect(QRectF(picture.left(), picture.top(), picture.width(), HIGHLIGHT_STRIPE), SCORE_HIGH)
         label = path.name if exists else f"⚠ 파일 없음: {path.name}"
         sound = [f"오디오 {clip.audio_offset_ms:+d}ms"] if clip.audio_offset_ms else []
         if clip.volume_db:
@@ -624,6 +647,67 @@ class TimelineWidget(QWidget):
             painter.setPen(QPen(QColor("#f1c40f"), 3 if clip.id == self.selected else 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(outline)
+
+    def _paint_scores(self, painter: QPainter, project: Project) -> None:
+        """맨 아래 점수 줄: V1 클립마다 점수 막대(하이라이트 구간은 초록) · 기준 점선 · 컷 평균 뱃지."""
+        top = self._tracks_bottom()
+        band = QRectF(HEADER_W, top, self.width() - HEADER_W, SCORE_H)
+        painter.fillRect(band, QColor("#121216"))
+        painter.setPen(QColor("#2a2a31"))
+        painter.drawLine(band.topLeft(), band.topRight())
+        if self._highlights is None:
+            return
+        base, height = top + SCORE_H - 2, SCORE_H - 6
+        for placed in project.placed():
+            if placed.track != MAIN_TRACK:
+                continue
+            info = self._highlights.clip(placed.clip)
+            x0, x1 = max(self._x(placed.start), HEADER_W), min(self._x(placed.end), self.width())
+            if info is None or x1 <= x0:
+                continue
+            clip = placed.clip
+            for x in range(int(x0), int(x1), 2):
+                t = project.source_time(clip, self._frame_at(x + 1) - placed.start)
+                value = info.scores.at(t)
+                bar = max(1.0, value / 100 * height)
+                inside = any(h.start <= t < h.end for h in info.highlights)
+                color = SCORE_HIGH if inside else SCORE_SPIKE if value >= info.enter else SCORE_LOW
+                painter.fillRect(QRectF(x, base - bar, 2, bar), color)
+            line = base - min(1.0, info.enter / 100) * height
+            painter.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(x0, line), QPointF(x1, line))
+            painter.setPen(QColor("#2a2a31"))
+            painter.drawLine(QPointF(self._x(placed.start), top), QPointF(self._x(placed.start), top + SCORE_H))
+            self._paint_badge(painter, QRectF(x0, top, x1 - x0, SCORE_H), f"{info.mean:.0f}", info.is_highlight)
+
+    def _paint_badge(self, painter: QPainter, area: QRectF, text: str, highlight: bool) -> None:
+        metrics = painter.fontMetrics()
+        box = QRectF(area.left() + 3, area.top() + 3, metrics.horizontalAdvance(text) + 10, metrics.height() + 2)
+        if box.right() > area.right() - 2:
+            return
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#1e7e46") if highlight else QColor(0, 0, 0, 170))
+        painter.drawRoundedRect(box, 4, 4)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _score_tip(self, x: float, y: float) -> str | None:
+        """점수 줄 위 마우스: 그 순간 점수와 이유, 컷 평균."""
+        if self._highlights is None or y < self._tracks_bottom() or x < HEADER_W:
+            return None
+        frame = self._frame_at(x)
+        placed = next((p for p in self._project.placed() if p.track == MAIN_TRACK and p.start <= frame < p.end), None)
+        info = self._highlights.clip(placed.clip) if placed else None
+        if info is None:
+            return None
+        t = self._project.source_time(placed.clip, frame - placed.start)
+        reasons = info.scores.reasons(t - 1, t + 1)
+        lines = [f"이 순간 {info.scores.at(t):.0f}점" + (f" · {', '.join(reasons)}" if reasons else "")]
+        lines.append(f"이 컷 평균 {info.mean:.0f}점" + (" · 하이라이트 컷" if info.is_highlight else "")
+                     + (f" ({', '.join(info.reasons)})" if info.reasons else ""))
+        lines.append(f"점선 = 하이라이트 기준 {info.enter:.0f}점 (분할 설정의 민감도로 바뀜)")
+        return "\n".join(lines)
 
     def _paint_drop(self, painter: QPainter) -> None:
         if self._drop is None:
@@ -766,7 +850,7 @@ class TimelineWidget(QWidget):
         hit = self._hit(x, y)
         adding = bool(event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
         if hit is None:
-            if y < RULER_H:
+            if y < RULER_H or y >= self._tracks_bottom():
                 self._drag = {"kind": "scrub"}
                 self._seek_to_x(x)
             else:  # 빈 곳: 놓을 때까지 안 움직이면 재생 헤드 이동, 끌면 박스 선택
@@ -799,8 +883,11 @@ class TimelineWidget(QWidget):
             self.setCursor(Qt.CursorShape.SizeHorCursor if edge else Qt.CursorShape.ArrowCursor)
             button = self._header_hit(x, y)
             tips = {"hide": "화면 숨기기/보이기 (소리는 그대로)", "mute": "소리 끄기/켜기 (화면은 그대로)"}
+            score_tip = self._score_tip(x, y)
             if button:
                 self.setToolTip(f"V{button[0]} {tips[button[1]]}")
+            elif score_tip:
+                self.setToolTip(score_tip)
             elif ADD_BUTTON.contains(QPointF(x, y)):
                 self.setToolTip("맨 위에 영상 줄 추가 (줄 이름 칸 우클릭: 끼워 넣기·삭제)")
             else:

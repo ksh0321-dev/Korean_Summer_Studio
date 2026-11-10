@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         devices.microphones_changed.connect(self._update_device_status)
         self.recorder_page.busy_changed.connect(self._set_busy)
         self.recorder_page.settings_edited.connect(self._apply_settings)
+        self.editor_page.settings_edited.connect(self._apply_settings)  # 하이라이트 분할 기준
         self.recorder_page.edit_requested.connect(self._edit_recording)
         self._update_device_status()
         self._remember_project()

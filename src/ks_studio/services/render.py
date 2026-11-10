@@ -102,7 +102,10 @@ class TimelineRenderer:
         sources: SourceCache,
         size: tuple[int, int],
         pix_fmt: str,
+        beauty=None,
     ) -> None:
+        """beauty = services.timeline_beauty.TimelineBeauty (내보낼 때만 — 준비(prepare)를 마친 것). 원본 프레임마다 AI 보정."""
+        self._beauty = beauty
         self._project = project
         self._workspace = workspace
         self._sources = sources
@@ -266,7 +269,12 @@ class TimelineRenderer:
         return self._cubes[source]
 
     def _prepare(self, decoded: av.VideoFrame, clip: Clip) -> av.VideoFrame:
-        """맞추기 전에: 원본 색 보정(색 보정 탭) → 클립 LUT → 자르기·회전·뒤집기 → 클립 색. 아무것도 안 했으면 그대로 (변환 비용 없음)."""
+        """맞추기 전에: (내보낼 때) AI 보정 → 원본 색 보정(색 보정 탭) → 클립 LUT → 자르기·회전·뒤집기 → 클립 색.
+        아무것도 안 했으면 그대로 (변환 비용 없음). AI 보정은 출력을 채울 만큼 줄인 크기로 입힌다 (services.timeline_beauty)."""
+        if self._beauty is not None and clip.source in self._beauty.settings:
+            from ks_studio.services.timeline_beauty import work_size
+
+            decoded = self._beauty.apply(decoded, clip, work_size((decoded.width, decoded.height), self._size, clip))
         cube = self._source_cube(clip.source)
         if not (clip.shaped or clip.graded or cube):
             return decoded

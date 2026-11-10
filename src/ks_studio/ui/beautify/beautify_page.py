@@ -4,6 +4,8 @@
      전/후 비교 (슬라이더로 바로 바뀜) → [이 설정으로 OK]
      → 아무 장면이나 스크럽하는 전/후 미리보기 (느린 PC는 끌 수 있음) → [보정본 만들기] → <프로젝트>/ai/<이름>_보정.mp4
 보정본은 컷편집 워크스페이스에 녹화본처럼 나타난다. 원본마다 설정은 ai/settings.json에 남는다.
+[이 설정으로 OK]를 한 설정은 컷편집 타임라인을 내보낼 때 그 원본을 쓴 프레임에만 자동으로 입혀진다 (services.timeline_beauty)
+→ 보정본 파일은 보정한 영상 파일이 따로 필요할 때만 만든다.
 """
 
 import time
@@ -94,6 +96,10 @@ def _pixmap(rgb: np.ndarray) -> QPixmap:
     rgb = np.ascontiguousarray(rgb)
     h, w, _ = rgb.shape
     return QPixmap.fromImage(QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy())
+
+
+EXPORT_NOTE = ("[이 설정으로 OK]를 하면 컷편집 타임라인을 내보낼 때 이 영상을 쓴 부분에만 보정이 자동으로 입혀집니다 "
+               "(보정본을 만들어 다시 넣지 않아도 됩니다)")
 
 
 class BeautifyPage(QWidget):
@@ -323,10 +329,17 @@ class BeautifyPage(QWidget):
         self.progress.setRange(0, 1000)
         self.progress.hide()
         self.render_button = QPushButton("보정본 만들기")
+        self.render_button.setToolTip(EXPORT_NOTE + "\n보정본 파일(원본 전체를 원본 크기로)은 보정한 영상 파일이 따로 필요할 때만 만드세요.")
         self.render_button.clicked.connect(self._render)
+        self.export_note = QLabel("✨ " + EXPORT_NOTE)
+        self.export_note.setObjectName("hint")
+        self.export_note.setWordWrap(True)
         bottom = QWidget()
         bottom_layout = QHBoxLayout(bottom)
-        bottom_layout.addWidget(self.status, 1)
+        notes = QVBoxLayout()
+        notes.addWidget(self.status)
+        notes.addWidget(self.export_note)
+        bottom_layout.addLayout(notes, 1)
         bottom_layout.addWidget(self.progress)
         bottom_layout.addWidget(self.render_button)
 

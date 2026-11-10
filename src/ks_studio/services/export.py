@@ -31,7 +31,14 @@ def export_project(
 ) -> bool:
     """끝까지 쓰면 True, 취소하면 False (쓰다 만 파일은 지운다)."""
     fps = project.fps
-    renderer = TimelineRenderer(project, workspace, sources, size, "yuv420p")
+    from ks_studio.services.timeline_beauty import TimelineBeauty
+
+    beauty = TimelineBeauty(project, workspace, sources)  # AI 보정 탭 설정 (쓰는 구간만 얼굴 분석)
+    if beauty.active:
+        beauty.prepare(cancel=cancel.is_set)
+        if cancel.is_set():
+            return False
+    renderer = TimelineRenderer(project, workspace, sources, size, "yuv420p", beauty if beauty.active else None)
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(output.name + ".part")
     with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as container:

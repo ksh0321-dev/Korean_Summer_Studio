@@ -2,7 +2,9 @@
 
 파생 파일은 모두 <프로젝트>/cache/ 아래에 있어 프로젝트 폴더를 지우면 같이 사라진다:
   cache/<키>.audio.npy · .peaks.npy · .thumbs2.npz      소리·파형·썸네일 (키 = sources.cache_name: 이름+경로·크기·시각 해시)
+  cache/<키>.highlight1.npz                              하이라이트 점수 재료 (소리 세기·움직임·표정, 20분 영상 ≈ 1MB)
   cache/<키>.faces_<사람>.npy                            AI 보정 얼굴 분석 (영상 길이에 비례 — 20분 4K 60fps ≈ 60MB)
+  cache/<키>.faces_<사람>.spans.npz                      내보낼 때 쓰는 구간만 분석한 얼굴 점 (services.timeline_beauty)
   cache/optimized/<키>.mp4                               편집용 사본 (원본만큼 크다)
   cache/ai_samples/<키>.v1.npz · cache/ai_clips/<키>.mp4  AI 샘플 후보 장면 · 1분 미리보기 영상
   cache/export_preview.mp4                               내보내기 저해상도 미리보기 (매번 덮어쓴다)
@@ -22,10 +24,11 @@ from ks_studio.core.project import Project
 from ks_studio.core.workspace import Workspace
 from ks_studio.services.face import track_file
 from ks_studio.services.sources import OPTIMIZED_DIR, cache_name, optimized_path
+from ks_studio.services.timeline_beauty import spans_file
 
 log = logging.getLogger(__name__)
 
-CURRENT_SUFFIXES = (".audio.npy", ".peaks.npy", ".thumbs2.npz")  # cache/ 바로 아래 파일 중 지금 쓰는 형식 (+ .faces_*.npy)
+CURRENT_SUFFIXES = (".audio.npy", ".peaks.npy", ".thumbs2.npz", ".highlight1.npz")  # cache/ 바로 아래 파일 중 지금 쓰는 형식 (+ .faces_*.npy)
 SUBDIRS = ("ai_samples", "ai_clips")
 LEFTOVER_PATTERNS = ("*.part", "*.part.npz", "*.tmp")
 PREVIEW_FILES = ("export_preview.mp4",)
@@ -142,7 +145,9 @@ def project_files(workspace: Workspace) -> tuple[list[Path], set[Path]]:
         if path.exists():
             copy = optimized_path(workspace.cache_dir, path)
             media = copy if copy.exists() else path
-            keep.add(track_file(workspace.cache_dir, cache_name(media), settings.target_vector))
+            track = track_file(workspace.cache_dir, cache_name(media), settings.target_vector)
+            keep.add(track)
+            keep.add(spans_file(track))  # 내보낼 때 쓰는 구간만 분석한 것 (services.timeline_beauty)
     return live, keep
 
 

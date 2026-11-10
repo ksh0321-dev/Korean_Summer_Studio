@@ -79,6 +79,10 @@ class AppSettings:
     default_export_preset: str = ""  # 내보내기 탭을 처음 열 때 고를 프리셋 키 ("" = 직접 고르기)
     # 프로그램
     check_updates: bool = True  # 켤 때 새 버전이 있는지 GitHub에서 확인
+    # 컷편집 하이라이트 분할 (core.highlight_cuts.Options)
+    highlight_sensitivity: int = 50  # 0 = 아주 뚜렷한 곳만, 100 = 조금만 두드러져도
+    highlight_pad: float = 1.0  # 하이라이트 앞뒤로 남길 여유 (초)
+    highlight_min_length: float = 3.0  # 이보다 짧은 하이라이트는 버린다 (초)
 
     @property
     def sync_calibration(self) -> SyncCalibration | None:
