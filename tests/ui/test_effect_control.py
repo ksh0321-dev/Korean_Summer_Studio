@@ -21,3 +21,13 @@ def test_slider_and_number_follow_each_other_once():
     assert control.spin.value() == 70 and seen == [-40, 25]
     control.spin.setValue(150)
     assert control.value() == 100  # 범위 밖은 끝값
+
+
+def test_skin_tab_has_nasolabial_with_tip():
+    from ks_studio.core.beauty import EFFECTS
+    from ks_studio.ui.beautify.beautify_page import EFFECT_NAMES, EFFECT_TABS, EFFECT_TIPS
+
+    skin = dict(EFFECT_TABS)["피부"]
+    assert ("nasolabial", "팔자주름") in skin
+    assert "nasolabial" in EFFECTS and EFFECT_NAMES["nasolabial"] == "팔자주름"
+    assert "60~80%" in EFFECT_TIPS["nasolabial"]

@@ -299,3 +299,61 @@ def test_lip_colors_differ_and_gloss_brightens_lower_lip_center():
     x, y = round(sheen.cx), round(sheen.cy)
     assert glossy[y, x].astype(int).sum() > painted[y, x].astype(int).sum() + 30  # 아랫입술 가운데가 반짝
     assert (glossy[50, 50] == painted[50, 50]).all()  # 입술 밖은 그대로
+
+
+def fold_line(image: np.ndarray, lm: np.ndarray, value: int = 100) -> None:
+    """팔자주름처럼: 콧볼 바깥 → 입꼬리 바깥으로 어두운 선 (폭 16px — 눈 사이 400px 얼굴)."""
+    for (wing, _), corner in (((77, 78), 52), ((83, 84), 61)):
+        a, b = lm[wing], lm[corner]
+        side = np.sign(a[0] - 500)
+        start = (int(a[0] + side * 15), int(a[1] + 10))
+        end = (int(b[0] + side * 40), int(b[1] + 20))
+        cv2.line(image, start, end, (value, value, value), 16, cv2.LINE_AA)  # 실제 팔자처럼 잔결보다 넓게
+
+
+def fold_contrast(image: np.ndarray, lm: np.ndarray) -> float:
+    """선 가운데(왼쪽)와 바로 옆 피부의 밝기 차."""
+    a, b = lm[77], lm[52]
+    mid = ((a[0] - 15 + b[0] - 40) / 2, (a[1] + 10 + b[1] + 20) / 2)
+    on = image[int(mid[1]), int(mid[0])].astype(float).mean()
+    off = image[int(mid[1]), int(mid[0]) - 25].astype(float).mean()
+    return off - on
+
+
+def test_nasolabial_lifts_fold_shadow_and_keeps_rest():
+    lm = fake_face()
+    image = canvas()
+    fold_line(image, lm)
+    before = fold_contrast(image, lm)
+    full = apply(image, lm, BeautySettings(nasolabial=1.0))
+    half = apply(image, lm, BeautySettings(nasolabial=0.5))
+    assert before > 20
+    assert fold_contrast(full, lm) < before * 0.2  # 100% = 거의 다
+    assert before * 0.35 < fold_contrast(half, lm) < before * 0.75  # 슬라이더에 비례
+    assert (full[50, 50] == image[50, 50]).all()  # 띠 바깥은 그대로
+    assert apply(image, lm, BeautySettings()) is image
+
+
+def test_nasolabial_keeps_fine_texture():
+    """잔결(작은 무늬)은 남는다 — 그늘만 걷는다."""
+    lm = fake_face()
+    rng = np.random.default_rng(0)
+    image = np.clip(canvas().astype(int) + rng.integers(-6, 7, (1000, 1000, 1)), 0, 255).astype(np.uint8)
+    fold_line(image, lm)
+    out = apply(image, lm, BeautySettings(nasolabial=1.0))
+    a, b = lm[77], lm[52]
+    y, x = int((a[1] + b[1]) / 2 + 15), int((a[0] + b[0]) / 2 - 27)
+    patch_before = image[y - 8 : y + 8, x - 30 : x - 14, 0].astype(float)
+    patch_after = out[y - 8 : y + 8, x - 30 : x - 14, 0].astype(float)
+    assert patch_after.std() > 0.6 * patch_before.std()
+
+
+def test_nose_slim_full_strength_reaches_half_way():
+    from ks_studio.core.beauty import NOSE_CENTER, NOSE_WINGS, nose_pulls
+
+    lm = fake_face()
+    pulls = nose_pulls(lm, 1.0)
+    center = lm[list(NOSE_CENTER)].mean(axis=0)
+    wing = (lm[NOSE_WINGS[0][0]] + lm[NOSE_WINGS[0][1]]) / 2
+    moved = np.hypot(pulls[0].tx - pulls[0].cx, pulls[0].ty - pulls[0].cy)
+    assert moved == pytest.approx(0.5 * np.linalg.norm(center - wing), rel=1e-6)  # 100% = 콧볼이 가운데까지 거리의 절반

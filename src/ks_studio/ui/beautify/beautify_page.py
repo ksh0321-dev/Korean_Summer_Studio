@@ -64,7 +64,8 @@ SAVE_DELAY_MS = 500
 LEFT_MIN_WIDTH = 400  # 효과 이름 + 슬라이더 + 숫자 칸이 들어갈 폭 (단계 공통 기본 280은 슬라이더가 너무 짧았다)
 VIEW_MESSAGE, VIEW_SAMPLES, VIEW_PREVIEW, VIEW_CLIP = range(4)
 EFFECT_TABS = (  # (탭, ((BeautySettings 칸, 이름), ...)) — 턱 길이만 -100~100
-    ("피부", (("smooth", "매끈하게"), ("blemish", "잡티 제거"), ("brighten", "톤 밝게"), ("dark_circle", "다크서클"))),
+    ("피부", (("smooth", "매끈하게"), ("blemish", "잡티 제거"), ("brighten", "톤 밝게"), ("dark_circle", "다크서클"),
+             ("nasolabial", "팔자주름"))),
     ("얼굴형", (
         ("slim", "얼굴 갸름"), ("cheekbone", "광대 축소"), ("chin", "턱 길이 (−짧게 · +길게)"),
         ("eyes", "눈 키우기"), ("nose_slim", "콧볼 축소"), ("nose_length", "코 길이 줄이기"), ("smile", "웃는 입"),
@@ -80,6 +81,11 @@ EFFECT_TABS = (  # (탭, ((BeautySettings 칸, 이름), ...)) — 턱 길이만 
 EFFECT_NAMES = {field: name for _, rows in EFFECT_TABS for field, name in rows}
 FILL_CHOICES = (("telea", "빠르게"), ("migan", "자연스럽게 (MI-GAN)"), ("lama", "무늬까지 (LaMa, 느림)"))  # services.inpaint.FILLS
 BIPOLAR = {"chin"}
+EFFECT_TIPS = {  # 슬라이더에 마우스를 올리면
+    "nasolabial": "콧볼 옆에서 입꼬리 바깥으로 지는 그늘을 걷어 냅니다 (피부결은 그대로).\n"
+                  "100%면 거의 다 지워집니다 — 자연스럽게는 60~80%",
+    "nose_slim": "100%면 콧볼 폭이 약 10% 좁아집니다",
+}
 BETA = {"face_small", "waist", "shoulders", "legs"}  # 아직 다듬는 중 — 자세·옷·배경에 따라 흔적이 남을 수 있다
 BETA_NOTE = ("Beta 기능: 자세·옷·배경에 따라 경계에 흔적이 남거나 귀걸이·잔머리가 겹쳐 보일 수 있어요.\n"
              "샘플 컷·1분 미리보기로 꼭 확인하세요. 허리는 팔이 몸에서 떨어진 자세에서 잘 됩니다.")
@@ -156,6 +162,9 @@ class BeautifyPage(QWidget):
                 control.valueChanged.connect(self._on_effect_changed)
                 self.sliders[field] = control
                 form.addRow(name, control)
+                if field in EFFECT_TIPS:
+                    form.labelForField(control).setToolTip(EFFECT_TIPS[field])
+                    control.setToolTip(EFFECT_TIPS[field])
                 if field in BETA:  # 이름 칸에도 안내 (마우스를 올리면)
                     form.labelForField(control).setToolTip(BETA_NOTE)
                     control.setToolTip(BETA_NOTE)

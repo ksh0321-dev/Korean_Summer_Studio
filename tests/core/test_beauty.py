@@ -5,6 +5,7 @@ import math
 import numpy as np
 
 from ks_studio.core.beauty import (
+    NOSE_PULL_MAX,
     AiState,
     BeautySettings,
     cheek_ellipses,
@@ -82,7 +83,7 @@ def test_cheeks_follow_face_tilt():
 def test_nose_pulls_move_wings_toward_center():
     left, right = nose_pulls(fake_face(), 1.0)
     assert left.tx > left.cx and right.tx < right.cx  # 둘 다 가운데로
-    assert math.isclose(left.tx - left.cx, (500 - 425) * 0.3, rel_tol=0.05)
+    assert math.isclose(left.tx - left.cx, (500 - 425) * NOSE_PULL_MAX, rel_tol=0.05)
     assert nose_pulls(fake_face(), 0.0) == []
 
 

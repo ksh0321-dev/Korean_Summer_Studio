@@ -29,7 +29,10 @@ NOSE_WINGS = ((77, 78), (83, 84))
 NOSE_CENTER = (80, 86)
 CHEEK_CONTOUR = ((12, 13), (28, 29))  # 왼쪽 1,9~16 ↔ 오른쪽 17,25~32가 같은 순서로 짝 (12↔28, 13↔29)
 BLUSH_COLOR = (232, 112, 128)  # RGB, 자연스러운 핑크
-NOSE_PULL_MAX = 0.3  # 강도 100%일 때 콧볼이 코 가운데까지 거리의 30%만큼 들어온다
+NOSE_PULL_MAX = 0.5  # 강도 100%일 때 콧볼이 코 가운데까지 거리의 50%만큼 들어온다
+# (2026-11-10: 0.3 → 0.5. 실측 콧볼 폭 −6.3% → −10.6%, CapCut으로 만든 목표 쇼츠가 −10.7%. 콧볼 여러 점을 당겨 봐도 더 낫지 않았다)
+NASOLABIAL = (0.04, 0.12, 0.05, 0.09)  # 팔자주름 띠: 콧볼 바깥에서 밖으로 0.04 · 입꼬리에서 밖으로 0.12 · 아래로 0.05 · 반폭 0.09 (눈 사이 거리 대비)
+NASOLABIAL_REACH = 1.3  # 띠 길이를 이만큼 늘린다 (타원은 끝으로 갈수록 약해져서, 콧볼·입꼬리 끝까지 지우려면)
 NOSE_TIP = 86
 CHIN = 0
 # 윤곽 점 번호를 위에서 아래 순서로 (왼쪽 1,9~16,2~8 / 오른쪽 17,25~32,18~24, 같은 자리끼리 짝). 볼 아래~턱선 구간을 당긴다
@@ -87,7 +90,7 @@ LIP_COLORS = {  # 칸 값 → (이름, RGB)
 }
 LIP_GLOSS_SHEEN = (0.55, 0.42, 0.30)  # 광택 하이라이트 타원: 아랫입술에서 안쪽 쪽으로 0.55 · 반지름 가로(입 폭 대비) 0.42 · 세로(아랫입술 두께 대비) 0.30
 EFFECTS = (  # BeautySettings의 효과 세기 칸 (chin만 -1~1, 나머지 0~1)
-    "smooth", "blemish", "brighten", "dark_circle",
+    "smooth", "blemish", "brighten", "dark_circle", "nasolabial",
     "slim", "cheekbone", "chin", "eyes", "nose_slim", "nose_length", "smile", "face_small",
     "blush", "contour", "eyeshadow", "lip", "lip_gloss", "teeth", "eye_clear",
     "waist", "shoulders", "legs", "bg_blur",
@@ -101,6 +104,7 @@ class BeautySettings:
     blemish: float = 0.0  # 잡티 제거
     brighten: float = 0.0  # 피부 톤 밝게
     dark_circle: float = 0.0  # 다크서클 지우기
+    nasolabial: float = 0.0  # 팔자주름 지우기 (100% = 그늘을 거의 다)
     slim: float = 0.0  # 얼굴 갸름
     cheekbone: float = 0.0  # 광대 축소
     chin: float = 0.0  # 턱 길이 -1(짧게)~1(길게)
@@ -458,6 +462,24 @@ def under_eye_ellipses(lm: np.ndarray) -> list[Ellipse]:
         cx, cy = lm[c] + axis * down * width
         out.append(Ellipse(float(cx), float(cy), rx * width, ry * width, angle))
     return out
+
+
+def nasolabial_ellipses(lm: np.ndarray) -> list[Ellipse]:
+    """양쪽 팔자주름 자리: 콧볼 바깥 조금 밖 → 입꼬리 바깥 조금 아래로 이어지는 가는 띠."""
+    eyes = eye_distance(lm)
+    top, axis = _face_axis(lm)
+    middle = lm[list(NOSE_CENTER)].mean(axis=0)
+    out_wing, out_mouth, down, half = NASOLABIAL
+    shapes = []
+    for (wing, _), corner in zip(NOSE_WINGS, MOUTH_CORNERS):
+        side = lm[wing] - middle
+        side = side - axis * float(np.dot(side, axis))  # 얼굴 가로 방향 (바깥쪽)
+        side /= np.linalg.norm(side) + 1e-9
+        start = lm[wing] + side * out_wing * eyes
+        end = lm[corner] + side * out_mouth * eyes + axis * down * eyes
+        shape = _ellipse_along(start, end, half * eyes)
+        shapes.append(Ellipse(shape.cx, shape.cy, shape.rx * NASOLABIAL_REACH, shape.ry, shape.angle))
+    return shapes
 
 
 def smooth_track(landmarks: np.ndarray, radius: int = 2) -> np.ndarray:

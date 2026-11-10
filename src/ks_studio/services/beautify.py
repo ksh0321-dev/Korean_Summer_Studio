@@ -30,6 +30,7 @@ from ks_studio.core.beauty import (
     Zoom,
     brow_polygons,
     cheek_ellipses,
+    nasolabial_ellipses,
     cheekbone_pulls,
     chin_pulls,
     contour_shapes,
@@ -83,6 +84,10 @@ SMOOTH_MAX = 0.85  # 매끈하게 100%: 흐린 피부를 85% 섞는다 (결이 �
 SMOOTH_EYES_PX = 120  # 피부 흐리기는 눈 사이 거리가 이 정도가 되게 줄여서 한다 (4K 얼굴도 같은 모습·빠르게)
 BRIGHTEN_MAX = 0.12  # 톤 밝게 100%: 남은 밝기 여유의 12%만큼
 DARK_CIRCLE_MAX = 0.22
+NASOLABIAL_MAX = 1.0  # 팔자주름 100%: 주변보다 어두운 만큼(그늘)을 다 걷어 낸다 (슬라이더에 비례 — 자연스럽게는 60~80%)
+NASOLABIAL_WIDE = 0.07  # 주변 피부 밝기: 이 폭(눈 사이 거리 대비)보다 좁은 골짜기를 메운 밝은 윤곽 (모폴로지 닫힘)
+# (넓게 흐린 평균은 주름 자체의 어두움이 섞여 그늘을 70%만 찾았다 — 실측 가짜 주름 28 → 8)
+NASOLABIAL_FINE = 0.008  # 잔결을 남길 흐림 반경 — 이보다 작은 무늬(모공·결)는 그대로 (0.012는 주름 가장자리까지 깎아 25%가 남았다)
 LIP_MAX = 0.6  # 립 컬러 100%: 입술 색(a·b)을 60%만큼, 밝기는 그 1/4만큼 바꾼다 (레드·플럼은 조금 짙게, 누드는 조금 밝게)
 GLOSS_BOOST = 1.4  # 립 광택 100%: 입술에 원래 있던 반짝임(주변보다 밝은 곳)을 1.4배 더 밝게
 GLOSS_SHEEN = 0.45  # 립 광택 100%: 아랫입술 하이라이트에서 남은 밝기 여유의 45%만큼
@@ -138,6 +143,8 @@ def _apply_face(rgb: np.ndarray, landmarks: np.ndarray | None, settings: BeautyS
     face, lm = out[y0:y1, x0:x1], landmarks - (x0, y0)  # face는 out의 일부 (바꾸면 out이 바뀐다)
     if k["blemish"] > 0:
         _blemish(face, lm, k["blemish"])  # 흐리기 전에 (흐리면 잡티가 번져 찾기 어렵다)
+    if k["nasolabial"] > 0:
+        _nasolabial(face, lm, k["nasolabial"])  # 흐리기 전에 (그늘을 걷은 뒤 매끈하게가 이음매를 감춘다)
     _skin(face, lm, k["smooth"], k["brighten"])
     if k["dark_circle"] > 0:
         _lift(face, _under_eye_mask(face.shape, lm), DARK_CIRCLE_MAX * min(1.0, k["dark_circle"]))
@@ -226,6 +233,7 @@ REGION_COLORS = {  # RGB
     "shade": (120, 70, 40),
     "highlight": (255, 250, 220),
     "dark_circle": (170, 140, 255),
+    "nasolabial": (120, 200, 255),
     "slim": (255, 210, 60),
     "cheekbone": (255, 150, 40),
     "chin": (230, 120, 255),
@@ -283,6 +291,8 @@ def _areas(image: np.ndarray, lm: np.ndarray, settings: BeautySettings) -> list[
         areas.append(("skin", _skin_mask(shape, lm), []))
     if settings.dark_circle:
         areas.append(("dark_circle", np.minimum(1.0, 2 * _under_eye_mask(shape, lm)), []))
+    if settings.nasolabial:
+        areas.append(("nasolabial", np.minimum(1.0, 1.5 * _nasolabial_mask(shape, lm)), []))
     if settings.blemish:
         areas.append(("blemish", np.minimum(1.0, 3 * _blemish_spots(image, lm)), []))
     for kind, make in (("slim", slim_pulls), ("cheekbone", cheekbone_pulls), ("chin", chin_pulls),
@@ -441,6 +451,50 @@ def _under_eye_mask(shape, lm: np.ndarray) -> np.ndarray:
         return mask * (1 - _grow(_fill(shape, eye_polygons(lm)), 0.04 * eye_distance(lm)))
 
     return _soft(shape, lm, make)
+
+
+def _nasolabial_mask(shape, lm: np.ndarray) -> np.ndarray:
+    """팔자주름 띠 (가운데 1, 부드럽게 0) — 입술은 뺀다."""
+    def make(shape, lm):
+        mask = np.zeros(shape[:2], np.float32)
+        for ellipse in nasolabial_ellipses(lm):
+            mask = np.maximum(mask, _ellipse_falloff(ellipse, 0, 0, shape[1], shape[0]))
+        return mask * (1 - np.minimum(1.0, 2 * _lip_mask(shape, lm)))
+
+    return _soft(shape, lm, make)
+
+
+def fold_shadow(fine: np.ndarray, eyes: float) -> np.ndarray:
+    """주름 그늘 = (주름보다 넓은 골짜기를 메운 밝은 윤곽) − 지금 밝기, 양수만. 볼처럼 넓고 완만한 그늘은 0에 가깝다."""
+    size = max(3, int(NASOLABIAL_WIDE * eyes) // 2 * 2 + 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    envelope = cv2.morphologyEx(fine, cv2.MORPH_CLOSE, kernel)
+    envelope = cv2.GaussianBlur(envelope, (0, 0), 0.25 * size)  # 닫힘이 만든 평평한 턱을 고르게
+    return np.clip(envelope - fine, 0, None)
+
+
+def _nasolabial(face: np.ndarray, lm: np.ndarray, strength: float) -> None:
+    """팔자주름 지우기: 띠 안에서 '주변보다 어두운 만큼'(그늘)만 밝혀 걷어 낸다. 잔결(모공·피부결)은 그대로 둔다.
+
+    흐리게 뭉개면(매끈하게처럼) 그 자리만 플라스틱처럼 보인다 → 그늘 = 주변의 밝은 윤곽 − 잔결만 지운 밝기 (fold_shadow).
+    그늘진 곳은 색도 조금 붉고 탁해서, 그늘 진하기만큼 주변 색 쪽으로 같이 옮긴다. 세기는 슬라이더에 비례 (100% = 95%).
+    """
+    mask = _nasolabial_mask(face.shape, lm)
+    eyes = eye_distance(lm)
+    amount = NASOLABIAL_MAX * min(1.0, strength)
+
+    def change(lab: np.ndarray, alpha: np.ndarray) -> None:
+        L = lab[..., 0]
+        fine = cv2.GaussianBlur(L, (0, 0), NASOLABIAL_FINE * eyes)
+        shadow = fold_shadow(fine, eyes)  # L 단위 (0~100)
+        weight = alpha * amount
+        lab[..., 0] = L + shadow * weight
+        share = np.clip(shadow / 4.0, 0, 1) * weight  # 그늘이 L 4 이상이면 색도 다 옮긴다
+        for c in (1, 2):
+            around = cv2.GaussianBlur(lab[..., c], (0, 0), 1.5 * NASOLABIAL_WIDE * eyes)
+            lab[..., c] += (around - lab[..., c]) * share
+
+    _in_lab(face, mask, change)  # 띠 둘레(가장자리 0.001까지)만 — 넓게 흐린 값도 그 안에서
 
 
 def _skin(face: np.ndarray, lm: np.ndarray, smooth: float, brighten: float) -> None:
